@@ -17,8 +17,8 @@ from orion_heir.dialects.ckks import (
 )
 from orion_heir.dialects.lwe import (
     LWE,
-    NewLWECiphertextType,
-    NewLWEPlaintextType,
+    LWECiphertextType,
+    LWEPlaintextType,
     RLWEEncodeOp,
     InverseCanonicalEncodingAttr,
     PlaintextSpaceAttr,
@@ -69,8 +69,8 @@ def test_ckks_dialect_has_expected_ops():
 def test_lwe_dialect_has_expected_types():
     """LWE dialect registers the expected type attributes."""
     attr_names = {attr.name for attr in LWE.attributes}
-    assert "lwe.new_lwe_ciphertext" in attr_names
-    assert "lwe.new_lwe_plaintext" in attr_names
+    assert "lwe.lwe_ciphertext" in attr_names
+    assert "lwe.lwe_plaintext" in attr_names
     assert "lwe.rlwe_encode" in {op.name for op in LWE.operations}
 
 
