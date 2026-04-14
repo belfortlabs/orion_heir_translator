@@ -31,7 +31,7 @@ from orion_heir.dialects.polynomial import Polynomial, RingAttr, PolynomialAttr
 from orion_heir.dialects.mod_arith import ModArith, ModArithType
 from orion_heir.dialects.rns import RNS, RNSType
 from orion_heir.dialects.mgmt import MGMT
-from orion_heir.dialects.orion import ORION as Orion, LinearTransformOp, ChebyshevOp
+from orion_heir.dialects.orion import Orion, LinearTransformOp, ChebyshevOp
 from orion_heir.dialects.lwe_traits import (
     SameOperandsAndResultRings,
     AllCiphertextTypesMatch,
