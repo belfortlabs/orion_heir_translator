@@ -18,7 +18,7 @@ from orion_heir.dialects.polynomial import Polynomial
 from orion_heir.dialects.mod_arith import ModArith
 from orion_heir.dialects.rns import RNS
 from orion_heir.dialects.mgmt import MGMT
-from orion_heir.dialects.orion import ORION as Orion
+from orion_heir.dialects.orion import Orion
 
 
 def _make_op(op_type, result_var=None, metadata=None):
