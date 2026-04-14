@@ -23,12 +23,11 @@ from orion_heir.dialects.lwe import (
     RLWEEncodeOp,
     PlaintextSpaceAttr,
     CiphertextSpaceAttr,
-    ApplicationDataAttr,
     KeyAttr,
     ModulusChainAttr,
     FullCRTPackingEncodingAttr,
-    NewLWECiphertextType,
-    NewLWEPlaintextType,
+    LWECiphertextType,
+    LWEPlaintextType,
 )
 
 from orion_heir.dialects.mod_arith import ModArithType
@@ -83,11 +82,6 @@ class TypeBuilder:
 
         self.key = KeyAttr([])
 
-        # Application data - assuming slots equal to half the ring degree
-        slots = getattr(self.scheme_params, "slots",
-                        self.scheme_params.ring_degree / 2)
-        self.app_data = ApplicationDataAttr([TensorType(f64, [slots])])
-
         # Plaintext space
         self.base_pt_space = PlaintextSpaceAttr(
             [self.ring_f64, self.base_encoding])
@@ -117,27 +111,23 @@ class TypeBuilder:
 
     def get_default_ciphertext_type(self):
         """Get the default ciphertext type at maximum level."""
-        from orion_heir.dialects.lwe import NewLWECiphertextType
+        from orion_heir.dialects.lwe import LWECiphertextType
 
-        return NewLWECiphertextType([
-            self.app_data, self.base_pt_space, self.ct_space, self.key,
-            self.mod_chain
+        return LWECiphertextType([
+            self.base_pt_space, self.ct_space, self.key, self.mod_chain
         ])
 
     def get_default_plaintext_type(self):
         """Get the default plaintext type."""
-        from orion_heir.dialects.lwe import NewLWEPlaintextType
+        from orion_heir.dialects.lwe import LWEPlaintextType
 
-        return NewLWEPlaintextType([self.app_data, self.base_pt_space])
+        return LWEPlaintextType([self.base_pt_space])
 
     def create_plaintext_type_for_tensor(self,
                                          tensor_type: TensorType,
                                          scale: int = 0):
         """Create a plaintext type that matches the actual tensor being encoded."""
         from xdsl.dialects.builtin import IntegerAttr, IntegerType
-
-        # Create application data that matches the actual tensor type
-        app_data = ApplicationDataAttr([tensor_type])
 
         # Use the existing encoding and ring if the scale isn't provided.
         if scale == 0:
@@ -147,7 +137,7 @@ class TypeBuilder:
 
         pt_space = PlaintextSpaceAttr([self.ring_f64, encoding])
 
-        return NewLWEPlaintextType([app_data, pt_space])
+        return LWEPlaintextType([pt_space])
 
     def create_plaintext_encoding(self,
                                   constant_value: SSAValue,
@@ -189,11 +179,11 @@ class TypeBuilder:
     def get_scaling_factor(self, type_obj: Any) -> int:
         """Extract scaling factor from plaintext or ciphertext type."""
         encoding = None
-        if isinstance(type_obj, NewLWEPlaintextType):
-            plaintext_space = type_obj.parameters[1]  # PlaintextSpaceAttr
+        if isinstance(type_obj, LWEPlaintextType):
+            plaintext_space = type_obj.parameters[0]  # PlaintextSpaceAttr
             encoding = plaintext_space.encoding
-        elif isinstance(type_obj, NewLWECiphertextType):
-            plaintext_space = type_obj.parameters[1]  # PlaintextSpaceAttr
+        elif isinstance(type_obj, LWECiphertextType):
+            plaintext_space = type_obj.parameters[0]  # PlaintextSpaceAttr
             encoding = plaintext_space.encoding
 
         if encoding is None:
@@ -208,15 +198,14 @@ class TypeBuilder:
 
     def create_rescaled_type(self, input_type: Any, target_scale: int) -> Any:
         """Create a new type with rescaled scaling factor and reduced modulus chain."""
-        if not isinstance(input_type, NewLWECiphertextType):
+        if not isinstance(input_type, LWECiphertextType):
             return input_type
 
         # Extract all components
-        app_data = input_type.parameters[0]
-        old_pt_space = input_type.parameters[1]
-        old_ct_space = input_type.parameters[2]
-        key = input_type.parameters[3]
-        old_modulus_chain = input_type.parameters[4]
+        old_pt_space = input_type.parameters[0]
+        old_ct_space = input_type.parameters[1]
+        key = input_type.parameters[2]
+        old_modulus_chain = input_type.parameters[3]
 
         # Create new encoding with target scale
         old_encoding = old_pt_space.encoding
@@ -262,16 +251,16 @@ class TypeBuilder:
         ])
 
         # Return new ciphertext type with proper rescaling
-        return NewLWECiphertextType(
-            [app_data, new_pt_space, new_ct_space, key, new_modulus_chain])
+        return LWECiphertextType(
+            [new_pt_space, new_ct_space, key, new_modulus_chain])
 
     def get_next_modulus_ring(self, input_type: Any):
         """Get the target ring for rescaling based on the input ciphertext type."""
-        if not isinstance(input_type, NewLWECiphertextType):
+        if not isinstance(input_type, LWECiphertextType):
             return self.ring_rns  # Fallback
 
         # Get current modulus chain level
-        modulus_chain = input_type.parameters[4]
+        modulus_chain = input_type.parameters[3]
         current_level = modulus_chain.current.value.data
         new_level = max(0, current_level - 1)
 
@@ -352,8 +341,8 @@ class TypeBuilder:
         if match_ciphertext_type is not None:
             # Extract scaling factor from ciphertext type
             if (hasattr(match_ciphertext_type, "parameters")
-                    and len(match_ciphertext_type.parameters) >= 2):
-                ct_pt_space = match_ciphertext_type.parameters[1]
+                    and len(match_ciphertext_type.parameters) >= 1):
+                ct_pt_space = match_ciphertext_type.parameters[0]
                 target_scale = ct_pt_space.encoding.scaling_factor.value.data
         elif target_scale is None:
             target_scale = getattr(self.scheme_params, "log_scale", 40)
@@ -398,9 +387,8 @@ class TypeBuilder:
         new_ct_space = CiphertextSpaceAttr(
             [new_ring, self.ct_space.encryption_type, self.ct_space.size])
 
-        return NewLWECiphertextType([
-            self.app_data, self.base_pt_space, new_ct_space, self.key,
-            level_mod_chain
+        return LWECiphertextType([
+            self.base_pt_space, new_ct_space, self.key, level_mod_chain
         ])
 
     def create_plaintext_type_with_scale(self,
@@ -412,15 +400,11 @@ class TypeBuilder:
         # If matching a ciphertext type, extract its scaling factor
         if match_ciphertext_type is not None:
             if (hasattr(match_ciphertext_type, "parameters")
-                    and len(match_ciphertext_type.parameters) >= 2):
+                    and len(match_ciphertext_type.parameters) >= 1):
                 ct_pt_space = match_ciphertext_type.parameters[
-                    1]  # PlaintextSpaceAttr
+                    0]  # PlaintextSpaceAttr
                 ct_encoding = ct_pt_space.encoding
                 log_scale = ct_encoding.scaling_factor.value.data
-                # Also use the same application data
-                self.app_data = match_ciphertext_type.parameters[0]
-            else:
-                app_data = self.app_data
 
         # Use provided log_scale or default
         if log_scale is None:
@@ -428,7 +412,7 @@ class TypeBuilder:
 
         encoding = InverseCanonicalEncodingAttr([IntegerAttr(log_scale, IntegerType(32))])
         pt_space = PlaintextSpaceAttr([self.ring_f64, encoding])
-        return NewLWEPlaintextType([self.app_data, pt_space])
+        return LWEPlaintextType([pt_space])
 
     def create_ciphertext_type_with_dimension(self,
                                               dimension: int = 2,
@@ -436,12 +420,10 @@ class TypeBuilder:
         """Create a ciphertext type with specific dimension, optionally preserving other attributes."""
         if preserve_from_type is not None:
             # Preserve everything except ciphertext dimension
-            app_data = preserve_from_type.parameters[0]
-            plaintext_space = preserve_from_type.parameters[
-                1]  # Keep same scaling factor!
-            old_ct_space = preserve_from_type.parameters[2]
-            key = preserve_from_type.parameters[3]
-            modulus_chain = preserve_from_type.parameters[4]
+            plaintext_space = preserve_from_type.parameters[0]
+            old_ct_space = preserve_from_type.parameters[1]
+            key = preserve_from_type.parameters[2]
+            modulus_chain = preserve_from_type.parameters[3]
 
             # Only change the dimension
             ct_space = CiphertextSpaceAttr([
@@ -451,7 +433,6 @@ class TypeBuilder:
             ])
         else:
             # Use default values
-            app_data = self.app_data
             plaintext_space = self.base_pt_space
             ct_space = CiphertextSpaceAttr([
                 self.ring_rns,
@@ -461,8 +442,8 @@ class TypeBuilder:
             key = self.key
             modulus_chain = self.mod_chain
 
-        return NewLWECiphertextType(
-            [app_data, plaintext_space, ct_space, key, modulus_chain])
+        return LWECiphertextType(
+            [plaintext_space, ct_space, key, modulus_chain])
 
     def create_relinearized_ciphertext_type(self,
                                             input_ciphertext_type: Any) -> Any:
@@ -471,15 +452,10 @@ class TypeBuilder:
             return input_ciphertext_type
 
         # Extract all components from input type
-        app_data = input_ciphertext_type.parameters[
-            0]  # ApplicationDataAttr - PRESERVE
-        plaintext_space = input_ciphertext_type.parameters[
-            1]  # PlaintextSpaceAttr - PRESERVE
-        ciphertext_space = input_ciphertext_type.parameters[
-            2]  # CiphertextSpaceAttr - MODIFY SIZE ONLY
-        key = input_ciphertext_type.parameters[3]  # KeyAttr - PRESERVE
-        modulus_chain = input_ciphertext_type.parameters[
-            4]  # ModulusChainAttr - PRESERVE
+        plaintext_space = input_ciphertext_type.parameters[0]  # PlaintextSpaceAttr
+        ciphertext_space = input_ciphertext_type.parameters[1]  # CiphertextSpaceAttr
+        key = input_ciphertext_type.parameters[2]  # KeyAttr
+        modulus_chain = input_ciphertext_type.parameters[3]  # ModulusChainAttr
 
         # Create new ciphertext space with size = 2 (degree 1), preserving everything else
         new_ciphertext_space = CiphertextSpaceAttr([
@@ -489,8 +465,7 @@ class TypeBuilder:
         ])
 
         # Create new ciphertext type preserving all plaintext information
-        return NewLWECiphertextType([
-            app_data,  # SAME application data
+        return LWECiphertextType([
             plaintext_space,  # SAME plaintext space (including scaling factor!)
             new_ciphertext_space,  # Only difference: size = 2
             key,  # SAME key
@@ -512,20 +487,19 @@ class TypeBuilder:
 
         def get_encoding_from_type(type_obj):
             """Extract encoding from plaintext or ciphertext type."""
-            if isinstance(type_obj, NewLWEPlaintextType):
-                plaintext_space = type_obj.parameters[1]  # PlaintextSpaceAttr
+            if isinstance(type_obj, LWEPlaintextType):
+                plaintext_space = type_obj.parameters[0]  # PlaintextSpaceAttr
                 return plaintext_space.encoding
-            elif isinstance(type_obj, NewLWECiphertextType):
-                plaintext_space = type_obj.parameters[1]  # PlaintextSpaceAttr
+            elif isinstance(type_obj, LWECiphertextType):
+                plaintext_space = type_obj.parameters[0]  # PlaintextSpaceAttr
                 return plaintext_space.encoding
             return None
 
         def create_result_type_with_scale_size(base_type, new_scale, new_size):
             """Create a new type with updated scaling factor."""
-            if isinstance(base_type, NewLWEPlaintextType):
+            if isinstance(base_type, LWEPlaintextType):
                 # Get existing components
-                app_data = base_type.parameters[0]
-                plaintext_space = base_type.parameters[1]
+                plaintext_space = base_type.parameters[0]
                 ring = plaintext_space.ring
 
                 # Create new encoding with updated scale
@@ -543,15 +517,14 @@ class TypeBuilder:
                 new_pt_space = PlaintextSpaceAttr([ring, new_encoding])
 
                 # Return new plaintext type
-                return NewLWEPlaintextType([app_data, new_pt_space])
+                return LWEPlaintextType([new_pt_space])
 
-            elif isinstance(base_type, NewLWECiphertextType):
+            elif isinstance(base_type, LWECiphertextType):
                 # Get existing components
-                app_data = base_type.parameters[0]
-                plaintext_space = base_type.parameters[1]
-                ciphertext_space = base_type.parameters[2]
-                key = base_type.parameters[3]
-                modulus_chain = base_type.parameters[4]
+                plaintext_space = base_type.parameters[0]
+                ciphertext_space = base_type.parameters[1]
+                key = base_type.parameters[2]
+                modulus_chain = base_type.parameters[3]
                 ring = plaintext_space.ring
 
                 # Create new encoding with updated scale
@@ -573,8 +546,8 @@ class TypeBuilder:
                     IntegerAttr(new_size, IntegerType(32)),  # dimension
                 ])
                 # Return new ciphertext type
-                return NewLWECiphertextType(
-                    [app_data, new_pt_space, new_ct_space, key, modulus_chain])
+                return LWECiphertextType(
+                    [new_pt_space, new_ct_space, key, modulus_chain])
 
             return base_type
 
@@ -648,16 +621,16 @@ class TypeBuilder:
         """Infer the result type for a binary operation, handling dimension changes correctly."""
         # For multiplication operations, dimension increases BUT scaling factor should be computed correctly
         if op_type == "mul":
-            if isinstance(lhs_type, NewLWECiphertextType):
+            if isinstance(lhs_type, LWECiphertextType):
                 # Get current dimension from ciphertext space
-                ct_space = lhs_type.parameters[2]  # CiphertextSpaceAttr
+                ct_space = lhs_type.parameters[1]  # CiphertextSpaceAttr
                 current_dim = ct_space.size.value.data
 
                 # After multiplication, dimension increases by 1
                 new_dim = current_dim + 1
 
                 # Extract scaling factors and compute result scaling factor
-                lhs_pt_space = lhs_type.parameters[1]  # PlaintextSpaceAttr
+                lhs_pt_space = lhs_type.parameters[0]  # PlaintextSpaceAttr
                 lhs_encoding = lhs_pt_space.encoding
                 lhs_scale = lhs_encoding.scaling_factor.value.data
 
@@ -667,7 +640,7 @@ class TypeBuilder:
                     result_scale = lhs_scale + lhs_scale
                 else:
                     # Different operands
-                    rhs_pt_space = rhs_type.parameters[1]
+                    rhs_pt_space = rhs_type.parameters[0]
                     rhs_encoding = rhs_pt_space.encoding
                     rhs_scale = rhs_encoding.scaling_factor.value.data
                     result_scale = lhs_scale + rhs_scale
@@ -687,12 +660,11 @@ class TypeBuilder:
                 ])
 
                 # Create new ciphertext type with updated scaling factor and dimension
-                return NewLWECiphertextType([
-                    lhs_type.parameters[0],  # app_data
+                return LWECiphertextType([
                     new_pt_space,  # updated plaintext_space
                     new_ct_space,  # updated ciphertext_space
-                    lhs_type.parameters[3],  # key
-                    lhs_type.parameters[4],  # modulus_chain
+                    lhs_type.parameters[2],  # key
+                    lhs_type.parameters[3],  # modulus_chain
                 ])
 
         # For other operations, preserve the type
@@ -701,15 +673,14 @@ class TypeBuilder:
     def create_ciphertext_type_with_updated_scale(self, input_type: Any,
                                                   new_scale: int) -> Any:
         """Create a new ciphertext type with updated scaling factor."""
-        if not isinstance(input_type, NewLWECiphertextType):
+        if not isinstance(input_type, LWECiphertextType):
             return input_type
 
         # Extract all components
-        app_data = input_type.parameters[0]
-        old_pt_space = input_type.parameters[1]
-        ct_space = input_type.parameters[2]
-        key = input_type.parameters[3]
-        modulus_chain = input_type.parameters[4]
+        old_pt_space = input_type.parameters[0]
+        ct_space = input_type.parameters[1]
+        key = input_type.parameters[2]
+        modulus_chain = input_type.parameters[3]
 
         # Create new encoding with target scale
         old_encoding = old_pt_space.encoding
@@ -726,30 +697,29 @@ class TypeBuilder:
         new_pt_space = PlaintextSpaceAttr([old_pt_space.ring, new_encoding])
 
         # Return new ciphertext type with updated scaling factor
-        return NewLWECiphertextType(
-            [app_data, new_pt_space, ct_space, key, modulus_chain])
+        return LWECiphertextType(
+            [new_pt_space, ct_space, key, modulus_chain])
 
     def create_ciphertext_type_with_updated_level(self, input_type: Any,
                                                   level: int) -> Any:
         """Create a new ciphertext type with updated current level."""
         # mod chain stays the same, and current moves
         # rns types are updated
-        from ..dialects.lwe import (NewLWECiphertextType, PlaintextSpaceAttr,
+        from ..dialects.lwe import (LWECiphertextType, PlaintextSpaceAttr,
                                     InverseCanonicalEncodingAttr,
                                     FullCRTPackingEncodingAttr, RingAttr,
                                     ModulusChainAttr, CiphertextSpaceAttr)
         from ..dialects.rns import RNSType
         from xdsl.dialects.builtin import IntegerAttr, IntegerType
 
-        if not isinstance(input_type, NewLWECiphertextType):
+        if not isinstance(input_type, LWECiphertextType):
             return input_type
 
         # Extract all components
-        app_data = input_type.parameters[0]
-        old_pt_space = input_type.parameters[1]
-        ct_space = input_type.parameters[2]
-        key = input_type.parameters[3]
-        modulus_chain = input_type.parameters[4]
+        old_pt_space = input_type.parameters[0]
+        ct_space = input_type.parameters[1]
+        key = input_type.parameters[2]
+        modulus_chain = input_type.parameters[3]
 
         # Update ct_space with those moduli
         new_rns_type = RNSType([ArrayAttr(self.mod_types[:level + 1])])
@@ -762,9 +732,9 @@ class TypeBuilder:
             IntegerAttr(level, IntegerType(32)),
         ])
 
-        # Return new ciphertext type with updated scaling factor
-        return NewLWECiphertextType(
-            [app_data, old_pt_space, new_ct_space, key, new_mod_chain])
+        # Return new ciphertext type with updated level
+        return LWECiphertextType(
+            [old_pt_space, new_ct_space, key, new_mod_chain])
 
     def infer_plaintext_result_type(self, op_type: str, ct_type: Any,
                                     pt_type: Any) -> Any:
