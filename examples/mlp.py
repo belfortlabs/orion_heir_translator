@@ -211,8 +211,7 @@ def main():
         logScale=26,
         slots=4096,
         ring_degree=8192,
-        backend='lattigo',
-        require_orion=True
+        backend='lattigo'
     )
     translator = GenericTranslator()
     module = translator.translate(operations, scheme_params, "mlp")
