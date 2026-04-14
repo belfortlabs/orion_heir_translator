@@ -6,8 +6,8 @@ Provides CKKS homomorphic encryption operations and attributes
 from collections.abc import Sequence
 from typing import ClassVar
 
-from xdsl.dialects.builtin import IntegerAttr, FloatAttr, IndexType, ArrayAttr, DenseArrayBase, f64, TensorType
-from xdsl.ir import Attribute, Dialect, ParametrizedAttribute, SSAValue
+from xdsl.dialects.builtin import IntegerAttr, ArrayAttr, DenseArrayBase
+from xdsl.ir import Attribute, Dialect, ParametrizedAttribute
 from xdsl.irdl import (
     BaseAttr,
     IRDLOperation,
@@ -27,17 +27,15 @@ from xdsl.printer import Printer
 from xdsl.traits import Pure, Commutative
 
 # Import our custom dialects - this ensures they are loaded when CKKS is loaded
-from .lwe import LWE, NewLWECiphertextType, NewLWEPlaintextType
-from .polynomial import RingAttr
-from .mod_arith import ModArith
-from .rns import RNS
+from orion_heir.dialects.lwe import NewLWECiphertextType, NewLWEPlaintextType
+from orion_heir.dialects.polynomial import RingAttr
 
-from .lwe_traits import (
+from orion_heir.dialects.lwe_traits import (
     SameOperandsAndResultRings,
     SameOperandsAndResultPlaintextTypes,
     AllCiphertextTypesMatch,
     IsCiphertextPlaintextOp,
-    AllTypesMatch
+    AllTypesMatch,
 )
 
 
@@ -161,7 +159,9 @@ class AddOp(IRDLOperation):
         SameOperandsAndResultPlaintextTypes(),
     )
 
-    assembly_format = "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    assembly_format = (
+        "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    )
 
 
 @irdl_op_definition
@@ -184,7 +184,9 @@ class SubOp(IRDLOperation):
         SameOperandsAndResultPlaintextTypes(),
     )
 
-    assembly_format = "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    assembly_format = (
+        "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    )
 
 
 @irdl_op_definition
@@ -201,12 +203,10 @@ class MulOp(IRDLOperation):
     rhs = operand_def(NewLWECiphertextType)
     result = result_def(NewLWECiphertextType)
 
-    traits = traits_def(
-        Pure(),
-        Commutative(),
-        SameOperandsAndResultRings()
+    traits = traits_def(Pure(), Commutative(), SameOperandsAndResultRings())
+    assembly_format = (
+        "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
     )
-    assembly_format = "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
 
 
 @irdl_op_definition
@@ -252,7 +252,9 @@ class AddPlainOp(IRDLOperation):
         SameOperandsAndResultPlaintextTypes(),  # Derived plaintext types match
     )
 
-    assembly_format = "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    assembly_format = (
+        "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    )
 
 
 @irdl_op_definition
@@ -271,7 +273,9 @@ class SubPlainOp(IRDLOperation):
 
     traits = traits_def(Pure())
 
-    assembly_format = "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    assembly_format = (
+        "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    )
 
 
 @irdl_op_definition
@@ -294,7 +298,9 @@ class MulPlainOp(IRDLOperation):
         IsCiphertextPlaintextOp(),  # Ensures one ciphertext + one plaintext
     )
 
-    assembly_format = "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    assembly_format = (
+        "$lhs `,` $rhs attr-dict `:` `(` type($lhs) `,` type($rhs) `)` `->` type($result)"
+    )
 
 
 @irdl_op_definition
@@ -343,6 +349,27 @@ class RescaleOp(IRDLOperation):
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
 
+@irdl_op_definition
+class LevelReduce(IRDLOperation):
+    """
+    Lower the modulus level of the ciphertext.
+
+    Example: %red = ckks.level_reduce %ct { levelToDrop = 1 } : !ct_tensor
+    """
+
+    name = "ckks.level_reduce"
+
+    input = operand_def(NewLWECiphertextType)
+    result = result_def(NewLWECiphertextType)
+
+    levelToDrop = prop_def(IntegerAttr)
+
+    traits = traits_def(Pure())
+    irdl_options = [ParsePropInAttrDict()]
+
+    # Now the result type can be inferred from the input type
+    assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
+
 
 @irdl_op_definition
 class RotateOp(IRDLOperation):
@@ -373,25 +400,6 @@ class RotateOp(IRDLOperation):
 
 
 @irdl_op_definition
-class ExtractOp(IRDLOperation):
-    """
-    Extract operation to get a scalar from a tensor ciphertext.
-
-    Example: %ext = ckks.extract %ct, %idx : (!ct_tensor, index) -> !ct_scalar
-    """
-
-    name = "ckks.extract"
-
-    input = operand_def(NewLWECiphertextType)
-    offset = operand_def(IndexType)
-    result = result_def(NewLWECiphertextType)
-
-    traits = traits_def(Pure())
-
-    assembly_format = "$input `,` $offset attr-dict `:` `(` type($input) `,` type($offset) `)` `->` type($result)"
-
-
-@irdl_op_definition
 class BootstrapOp(IRDLOperation):
     """
     Bootstrap operation for CKKS ciphertexts.
@@ -405,7 +413,7 @@ class BootstrapOp(IRDLOperation):
     2. Re-encrypt with fresh noise and full level
     3. Return refreshed ciphertext
 
-    Example: %refreshed = ckks.bootstrap %input : !lwe.new_lwe_ciphertext -> !lwe.new_lwe_ciphertext
+    Example: %refreshed = ckks.bootstrap %input : !lwe.lwe_ciphertext -> !lwe.lwe_ciphertext
     """
 
     name = "ckks.bootstrap"
@@ -430,6 +438,7 @@ CKKS = Dialect(
         MulPlainOp,
         RelinearizeOp,
         RescaleOp,
+        LevelReduce,
         RotateOp,
         BootstrapOp,
     ],

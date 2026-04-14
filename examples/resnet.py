@@ -320,8 +320,7 @@ def run_orion_resnet_demo():
             logScale=40,  # From resnet config
             slots=32768,  # 2^15 for LogN=16
             ring_degree=65536,  # 2^16
-            backend='lattigo',
-            require_orion=True
+            backend='lattigo'
         )
         print("✅ FHE scheme parameters created")
     except Exception as e:
@@ -334,8 +333,7 @@ def run_orion_resnet_demo():
             logScale=40,
             slots=32768,
             ring_degree=65536,
-            backend='lattigo',
-            require_orion=False
+            backend='lattigo'
         )
     
     # Step 9: Generate HEIR MLIR
