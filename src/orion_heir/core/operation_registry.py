@@ -1270,7 +1270,7 @@ class CKKSMulScalarHandler(BaseOperationHandler):
         scalar_val = float(operation.metadata.get("constant_value", 1.0))
         is_integer = scalar_val.is_integer()
         ct_ty = current_value.type
-        slots = type_builder.scheme_params.ring_degree // 2
+slots = getattr(type_builder.scheme_params, "slots", type_builder.scheme_params.ring_degree // 2)
 
         # 1. arith.constant dense<scalar> : tensor<slotsxf64> (splat).
         tensor_type = TensorType(f64, [slots])
