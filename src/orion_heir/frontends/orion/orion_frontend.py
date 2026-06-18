@@ -36,6 +36,18 @@ def fix_encode_operations(module, type_builder):
                 encode_op = plaintext_operand.owner
                 ct_scale = type_builder.get_scaling_factor(op.lhs.type)
                 pt_scale = type_builder.get_scaling_factor(plaintext_operand.type)
+                out_scale = type_builder.get_scaling_factor(op.results[0].type)
+
+                # If the op's own typing is already internally consistent —
+                # for add/sub: out == ct == pt; for mul: out == ct + pt —
+                # the encode scale was a deliberate choice (e.g. free integer
+                # scalar mul encodes pt at scale 0) and we must not rewrite it.
+                if isinstance(op, (AddPlainOp, SubPlainOp)):
+                    consistent = out_scale == ct_scale and pt_scale == ct_scale
+                else:  # MulPlainOp
+                    consistent = out_scale == ct_scale + pt_scale
+                if consistent:
+                    continue
 
                 required_scale = (
                     ct_scale

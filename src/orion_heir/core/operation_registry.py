@@ -24,11 +24,18 @@ from xdsl.dialects.builtin import (
 )
 from xdsl.dialects.func import FuncOp
 from orion_heir.dialects.orion import LinearTransformOp
-from orion_heir.dialects.lwe import RLWEEncodeOp, LWEPlaintextType
+from orion_heir.dialects.lwe import (
+    InverseCanonicalEncodingAttr,
+    LWECiphertextType,
+    LWEPlaintextType,
+    PlaintextSpaceAttr,
+    RLWEEncodeOp,
+)
 from orion_heir.core.translator import FHEOperation
 from orion_heir.dialects.ckks import (
     AddOp,
     AddPlainOp,
+    LevelReduce,
     MulOp,
     MulPlainOp,
     RelinearizeOp,
@@ -54,6 +61,52 @@ def get_parent_func(block: Block) -> FuncOp:
     while not isinstance(func_op, FuncOp):
         func_op = func_op.parent_op()
     return func_op
+
+
+def _get_ct_level(value: SSAValue):
+    """Return the modulus_chain current level of a ciphertext SSA value, or None."""
+    if not isinstance(value.type, LWECiphertextType):
+        return None
+    return value.type.parameters[3].current.value.data
+
+
+def align_levels(
+    block: Block,
+    lhs: SSAValue,
+    rhs: SSAValue,
+    type_builder: Any,
+) -> tuple:
+    """Drop the higher-level operand to match the lower via ckks.level_reduce.
+
+    HEIR's binary CKKS verifiers (mul, add, sub, ...) require both operands
+    to live at the same modulus level. Operands produced by Orion can drift
+    apart when one passes through a level-dropping op (rescale after
+    mul_plain / scalar_mul) and its peer doesn't. Lattigo auto-aligns at
+    runtime; HEIR's IR doesn't, so we materialise the alignment explicitly.
+    """
+    lhs_lvl = _get_ct_level(lhs)
+    rhs_lvl = _get_ct_level(rhs)
+    if lhs_lvl is None or rhs_lvl is None or lhs_lvl == rhs_lvl:
+        return lhs, rhs
+
+    if lhs_lvl > rhs_lvl:
+        higher, lower_lvl, drop = lhs, rhs_lvl, lhs_lvl - rhs_lvl
+        higher_is_lhs = True
+    else:
+        higher, lower_lvl, drop = rhs, lhs_lvl, rhs_lvl - lhs_lvl
+        higher_is_lhs = False
+
+    reduced_type = type_builder.create_ciphertext_type_with_updated_level(
+        higher.type, lower_lvl
+    )
+    level_reduce = LevelReduce(
+        operands=[higher],
+        result_types=[reduced_type],
+        properties={"levelToDrop": IntegerAttr(drop, IntegerType(64))},
+    )
+    block.add_op(level_reduce)
+    aligned = level_reduce.results[0]
+    return (aligned, rhs) if higher_is_lhs else (lhs, aligned)
 
 
 class OperationHandler(Protocol):
@@ -109,6 +162,11 @@ class CKKSArithmeticHandler(BaseOperationHandler):
             if second_operand is None:
                 # If no second operand, return current value unchanged
                 return current_value
+
+            # Align operand levels (HEIR ckks.add/sub verifier requires match)
+            current_value, second_operand = align_levels(
+                block, current_value, second_operand, type_builder
+            )
 
             # Determine result type
             result_type = type_builder.infer_result_type(
@@ -166,6 +224,11 @@ class CKKSMulHandler(BaseOperationHandler):
                 other_operand = current_value
         else:
             other_operand = current_value
+
+        # Align operand levels (HEIR ckks.mul verifier requires match)
+        current_value, other_operand = align_levels(
+            block, current_value, other_operand, type_builder
+        )
 
         # 1. Create multiplication operation (doubles scaling factor)
         result_type = type_builder.infer_result_type(
@@ -1006,13 +1069,20 @@ class ChebyshevHandler(BaseOperationHandler):
         type_builder: Any,
     ) -> SSAValue:
         """Handle Chebyshev polynomial evaluation."""
+        import math
+
         from orion_heir.dialects.orion import ChebyshevOp
         from xdsl.dialects.builtin import ArrayAttr, FloatAttr, f64
 
-        # Get coefficients from operation
+        # Get coefficients from operation. The preceding prescale mul_scalar
+        # already maps the input from [a,b] → [-1,1] (Orion's runtime does the
+        # same; the Go binding's GenerateChebyshev hard-codes interval
+        # [-1,1]). If we passed the original [a,b] here, Lattigo's
+        # polynomial.Evaluator would re-apply the affine transform and burn
+        # an extra level per chebyshev call.
         coeffs = operation.kwargs.get("coefficients", [])
-        domain_start = operation.kwargs.get("domain_start", -1.0)
-        domain_end = operation.kwargs.get("domain_end", 1.0)
+        domain_start = -1.0
+        domain_end = 1.0
 
         if not coeffs:
             print("⚠️ No coefficients provided for Chebyshev operation")
@@ -1022,14 +1092,21 @@ class ChebyshevHandler(BaseOperationHandler):
         coeff_attrs = [FloatAttr(float(c), f64) for c in coeffs]
         coeff_array = ArrayAttr(coeff_attrs)
 
-        # Manual bootstrapping to deal with OpenFHE issues; removed and see if
-        # we can deal with them from inside HEIR.
-        # bootstrap_result_type = type_builder.get_default_ciphertext_type()
-        # bootstrap_op = BootstrapOp(operands=[current_value], result_types=[bootstrap_result_type])
-        # block.add_op(bootstrap_op)
-        # bootstrapped_value = bootstrap_op.results[0]
-
-        result_type = type_builder.get_default_ciphertext_type()
+        # Use Lattigo's own depth formula (utils/bignum/polynomial.go:144):
+        #   Polynomial.Depth() = ⌈log₂(degree)⌉
+        # Each unit of depth costs one CKKS level. Orion's per-op `level`
+        # annotation only reports the post-chebyshev bookkeeping level (not
+        # the actual depth Lattigo consumes), so we compute it ourselves to
+        # keep the IR level state aligned with runtime reality.
+        degree = max(0, len(coeffs) - 1)
+        depth = 0 if degree < 2 else math.ceil(math.log2(degree))
+        ct_lvl = _get_ct_level(current_value)
+        if ct_lvl is not None:
+            result_type = type_builder.create_ciphertext_type_with_updated_level(
+                current_value.type, max(0, ct_lvl - depth)
+            )
+        else:
+            result_type = type_builder.get_default_ciphertext_type()
         cheby_op = ChebyshevOp(
             operands=[current_value],
             result_types=[result_type],
@@ -1063,7 +1140,19 @@ class SaveRefHandler(BaseOperationHandler):
 
 
 class CKKSMulScalarHandler(BaseOperationHandler):
-    """Emit ``ckks.mul_scalar`` — ciphertext × float constant."""
+    """Multiply a ciphertext by a scalar constant.
+
+    Two paths, matching Orion's Python evaluator:
+
+    * **Integer-valued scalar** (incl. floats that round-trip through int):
+      encode at plaintext scale 1 (``scaling_factor=0``). The mul preserves
+      the ciphertext scale, so no rescale is needed and no level is consumed
+      — Lattigo's ``MulScalarIntNew`` does the same thing internally.
+
+    * **Genuine float scalar**: encode at the ciphertext's plaintext scale,
+      multiply (scale doubles), then rescale (level consumed). Matches
+      Lattigo's ``MulScalarFloatNew + Rescale``.
+    """
 
     def handle(
         self,
@@ -1073,20 +1162,89 @@ class CKKSMulScalarHandler(BaseOperationHandler):
         constants: Dict[str, SSAValue],
         type_builder: Any,
     ) -> SSAValue:
-        from orion_heir.dialects.ckks import MulScalarOp
-        from xdsl.dialects.builtin import FloatAttr, f64
-
-        scalar_val = operation.metadata.get("constant_value", 1.0)
-        result_type = current_value.type
-        op = MulScalarOp(
-            operands=[current_value],
-            result_types=[result_type],
-            properties={"scalar": FloatAttr(scalar_val, f64)},
+        from xdsl.dialects.builtin import (
+            TensorType,
+            f64,
+            DenseIntOrFPElementsAttr,
         )
-        block.add_op(op)
+        from xdsl.dialects.arith import ConstantOp
+
+        scalar_val = float(operation.metadata.get("constant_value", 1.0))
+        is_integer = scalar_val.is_integer()
+        ct_ty = current_value.type
+        slots = type_builder.scheme_params.ring_degree // 2
+
+        # 1. arith.constant dense<scalar> : tensor<slotsxf64> (splat).
+        tensor_type = TensorType(f64, [slots])
+        dense_attr = DenseIntOrFPElementsAttr.create_dense_float(
+            tensor_type, [scalar_val] * slots
+        )
+        const_op = ConstantOp(dense_attr, tensor_type)
+        block.add_op(const_op)
+        cleartext = const_op.results[0]
+
+        # 2. Encode. Pick the plaintext scale based on the path we want.
+        ct_pt_space = ct_ty.plaintext_space
+        if is_integer:
+            # Encode integer at scale 1 so ct × pt preserves the ct scale.
+            pt_encoding = InverseCanonicalEncodingAttr(
+                [IntegerAttr(0, IntegerType(32))]
+            )
+            pt_space = PlaintextSpaceAttr([ct_pt_space.ring, pt_encoding])
+        else:
+            pt_encoding = ct_pt_space.encoding
+            pt_space = ct_pt_space
+
+        plaintext_type = LWEPlaintextType([pt_space])
+        encode_op = RLWEEncodeOp(
+            operands=[cleartext],
+            result_types=[plaintext_type],
+            attributes={"encoding": pt_encoding, "ring": ct_pt_space.ring},
+        )
+        block.add_op(encode_op)
+        plaintext = encode_op.results[0]
+
+        # 3. ct × pt. For the integer path, pt scale = 1 so output scale ==
+        # input scale (HEIR's mul_plain verifier sums log-scales). For the
+        # float path, the output scale is doubled and a rescale follows.
+        if is_integer:
+            mul_op = MulPlainOp(
+                operands=[current_value, plaintext], result_types=[ct_ty]
+            )
+            block.add_op(mul_op)
+            result = mul_op.results[0]
+        else:
+            original_scale = type_builder.get_scaling_factor(ct_ty)
+            doubled_scale_type = (
+                type_builder.create_ciphertext_type_with_updated_scale(
+                    ct_ty, original_scale * 2
+                )
+            )
+            mul_op = MulPlainOp(
+                operands=[current_value, plaintext],
+                result_types=[doubled_scale_type],
+            )
+            block.add_op(mul_op)
+            mul_result = mul_op.results[0]
+
+            rescaled_type = type_builder.create_rescaled_type(
+                mul_result.type, original_scale
+            )
+            rescale_op = RescaleOp(
+                operands=[mul_result],
+                result_types=[rescaled_type],
+                properties={
+                    "to_ring": type_builder.get_next_modulus_ring(
+                        mul_result.type
+                    )
+                },
+            )
+            block.add_op(rescale_op)
+            result = rescale_op.results[0]
+
         if operation.result_var:
-            constants[operation.result_var] = op.results[0]
-        return op.results[0]
+            constants[operation.result_var] = result
+        return result
 
 
 class CKKSBootstrapHandler(BaseOperationHandler):
