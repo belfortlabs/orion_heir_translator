@@ -9,7 +9,7 @@ import json
 import math
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 import numpy as np
 
@@ -35,6 +35,10 @@ class ExportManifest:
     args: List[ExportedFile]
     input: dict
     crypto_params: dict
+    # Multi-input models (e.g. CriteoHELRM with `forward(dense, expanded_sparse)`)
+    # carry one entry per forward placeholder; single-input models leave this
+    # empty and rely on `input` (legacy back-compat).
+    inputs: Optional[List[dict]] = None
 
     def write(self, path: Path):
         data = {
@@ -44,6 +48,8 @@ class ExportManifest:
             "input": self.input,
             "crypto_params": self.crypto_params,
         }
+        if self.inputs:
+            data["inputs"] = self.inputs
         path.write_text(json.dumps(data, indent=2) + "\n")
 
 
@@ -82,15 +88,47 @@ class OrionDataExporter:
         Walks model layers in registration order (same as OrionFrontend.extract_operations),
         filtering to layers with precomputed diagonals (Linear, Conv2d).
 
+        `input_tensor` is either a single torch.Tensor (1-input models) or a
+        tuple/list of tensors (multi-input models like CriteoHELRM). For the
+        multi-input case we write `data/input.bin` for the first input
+        (back-compat with the single-example harness) AND a per-input
+        `data/input_arg<k>.bin` file for k=0..N-1 that the multi-arg Go
+        harness loads.
+
         Returns an ExportManifest describing all exported files.
         """
         data_dir = output_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Export input
-        input_flat = input_tensor.detach().numpy().flatten().astype(np.float64)
-        input_padded = _pad_to(input_flat, self.slots)
-        _write_f64_bin(data_dir / "input.bin", input_padded)
+        # Normalise to a list of tensors so the rest of the export is uniform.
+        if isinstance(input_tensor, (tuple, list)):
+            inputs: list = list(input_tensor)
+        else:
+            inputs = [input_tensor]
+
+        # Export each input as a separate file. The first input is also
+        # mirrored at the legacy `data/input.bin` path so existing
+        # single-input harnesses keep working.
+        input_files: list[dict] = []
+        for k, inp in enumerate(inputs):
+            flat = inp.detach().numpy().flatten().astype(np.float64)
+            padded = _pad_to(flat, self.slots)
+            if len(inputs) == 1:
+                fname = "input.bin"
+            else:
+                fname = f"input_arg{k}.bin"
+            _write_f64_bin(data_dir / fname, padded)
+            input_files.append({"file": f"data/{fname}", "len": self.slots})
+        if len(inputs) > 1:
+            # Mirror the first input to the legacy path so callers that
+            # haven't been updated for multi-input still find input.bin.
+            _write_f64_bin(
+                data_dir / "input.bin",
+                _pad_to(
+                    inputs[0].detach().numpy().flatten().astype(np.float64),
+                    self.slots,
+                ),
+            )
 
         # Walk layers in the same order as extract_operations
         args: List[ExportedFile] = []
@@ -108,6 +146,7 @@ class OrionDataExporter:
             args=args,
             input={"file": "data/input.bin", "len": self.slots},
             crypto_params=self._crypto_params_dict(),
+            inputs=input_files if len(inputs) > 1 else None,
         )
         manifest.write(output_dir / "manifest.json")
 
@@ -228,6 +267,15 @@ def generate_go_wrapper(
     """
     func_name = manifest.func_name
     arg_files = [(arg.file, arg.name) for arg in manifest.args]
+    # Multi-input models (e.g. CriteoHELRM) have manifest.inputs populated
+    # with one entry per forward placeholder. Single-input models stick with
+    # the legacy `manifest.input` (one file).
+    input_files = (
+        [entry["file"] for entry in manifest.inputs]
+        if manifest.inputs
+        else [manifest.input["file"]]
+    )
+    num_inputs = len(input_files)
     if has_bootstrapping and num_bootstrap_evals == 0:
         num_bootstrap_evals = 1
     if num_bootstrap_evals > 0:
@@ -290,6 +338,51 @@ def generate_go_wrapper(
         )
         call_prefix = "evaluator, params, encoder"
 
+    # Per-input encryption block. For each input k we load → encode →
+    # encrypt → name it `ct{k}` (k = 0 .. num_inputs-1).
+    encrypt_block_parts: list[str] = []
+    for k in range(num_inputs):
+        suffix = str(k) if num_inputs > 1 else ""
+        encrypt_block_parts.append(
+            f"\tinputVec{suffix} := loadF64(inputPath{suffix})\n"
+            f"\tpt{suffix} := ckks.NewPlaintext(params, {manifest.crypto_params['input_level']})\n"
+            f"\tpt{suffix}.Scale = params.DefaultScale()\n"
+            f"\tif err := encoder.Encode(inputVec{suffix}, pt{suffix}); err != nil {{\n"
+            f"\t\tpanic(err)\n"
+            f"\t}}\n"
+            f"\tct{suffix}, err{suffix} := encryptor.EncryptNew(pt{suffix})\n"
+            f"\tif err{suffix} != nil {{\n"
+            f"\t\tpanic(err{suffix})\n"
+            f"\t}}\n"
+        )
+    encrypt_block = "\n".join(encrypt_block_parts)
+
+    # Per-input ciphertext args (`ct, ct1, ct2, ...`).
+    if num_inputs == 1:
+        ct_args = "ct"
+    else:
+        ct_args = ", ".join(f"ct{k}" for k in range(num_inputs))
+
+    # runOn signature: each input gets its own inputPath param.
+    if num_inputs == 1:
+        run_extra_sig = ", inputPath string"
+        run_extra_call = "inputFile"
+    else:
+        run_extra_sig = ", " + ", ".join(
+            f"inputPath{k} string" for k in range(num_inputs)
+        )
+        run_extra_call = ", ".join(f"inputFile{k}" for k in range(num_inputs))
+
+    # Default-input-file constants. For multi-input we emit
+    # `inputFile0`, `inputFile1`, … pointing at the per-arg bins.
+    if num_inputs == 1:
+        input_const_block = f'const inputFile = "{input_files[0]}"\n'
+    else:
+        lines = "\n".join(
+            f'\tinputFile{k} = "{path}"' for k, path in enumerate(input_files)
+        )
+        input_const_block = f"const (\n{lines}\n)\n"
+
     run_go = (
         f"// {func_name}_run.go — AUTO-GENERATED by orion_heir. Do not edit by hand.\n"
         f"// Provides loadF64, configure(), and run() for the model-specific harness.\n"
@@ -299,10 +392,11 @@ def generate_go_wrapper(
         f"{imports_str}\n"
         f")\n"
         f"\n"
-        f"// Default input file when `run` is called without an explicit path\n"
+        f"// Default input file(s) when `run` is called without explicit paths\n"
         f"// (single-example back-compat). The N-example harness in main.go\n"
-        f"// passes inputFile=data/input_<i>.bin to evaluate a sweep.\n"
-        f'const inputFile = "{manifest.input["file"]}"\n'
+        f"// passes data/input_<i>.bin (single-input) or data/input_<i>_arg<k>.bin\n"
+        f"// (multi-input) for each example.\n"
+        f"{input_const_block}"
         f"\n"
         f"var argFiles = []string{{\n"
         f"{arg_files_str}\n"
@@ -325,26 +419,17 @@ def generate_go_wrapper(
         f"\treturn {func_name}__configure()\n"
         f"}}\n"
         f"\n"
-        f"// runOn evaluates the model on a specific input file. Used by the\n"
+        f"// runOn evaluates the model on specific input file(s). Used by the\n"
         f"// N-example harness to amortise keygen across multiple inputs.\n"
-        f"func runOn({run_sig}, inputPath string) []float64 {{\n"
-        f"\tinputVec := loadF64(inputPath)\n"
+        f"func runOn({run_sig}{run_extra_sig}) []float64 {{\n"
         f"\targs := make([][]float64, len(argFiles))\n"
         f"\tfor i, f := range argFiles {{\n"
         f"\t\targs[i] = loadF64(f)\n"
         f"\t}}\n"
         f"\n"
-        f"\tpt := ckks.NewPlaintext(params, {manifest.crypto_params['input_level']})\n"
-        f"\tpt.Scale = params.DefaultScale()\n"
-        f"\tif err := encoder.Encode(inputVec, pt); err != nil {{\n"
-        f"\t\tpanic(err)\n"
-        f"\t}}\n"
-        f"\tct, err := encryptor.EncryptNew(pt)\n"
-        f"\tif err != nil {{\n"
-        f"\t\tpanic(err)\n"
-        f"\t}}\n"
+        f"{encrypt_block}\n"
         f"\n"
-        f"\tresultCt := {func_name}({call_prefix}, ct, {arg_call})\n"
+        f"\tresultCt := {func_name}({call_prefix}, {ct_args}, {arg_call})\n"
         f"\n"
         f"\tresultPt := decryptor.DecryptNew(resultCt)\n"
         f"\tresult := make([]float64, params.MaxSlots())\n"
@@ -356,7 +441,7 @@ def generate_go_wrapper(
         f"\n"
         f"// Single-example back-compat shim.\n"
         f"func run({run_sig}) []float64 {{\n"
-        f"\treturn runOn({configure_vars}, inputFile)\n"
+        f"\treturn runOn({configure_vars}, {run_extra_call})\n"
         f"}}\n"
     )
 

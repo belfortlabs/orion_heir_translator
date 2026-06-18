@@ -52,6 +52,7 @@ class GenericTranslator:
         operations: List[FHEOperation],
         scheme_params: SchemeParameters,
         function_name: str = "fhe_computation",
+        num_inputs: int = 1,
     ) -> ModuleOp:
         """
         Translate a list of FHE operations to HEIR MLIR.
@@ -60,6 +61,9 @@ class GenericTranslator:
             operations: List of FHE operations to translate
             scheme_params: FHE scheme parameters
             function_name: Name for the generated function
+            num_inputs: Number of ciphertext function arguments (= number of
+                forward() placeholders in the source model). Single-arg models
+                use 1; multi-arg models like CriteoHELRM use >1.
 
         Returns:
             Complete MLIR module containing the translated operations
@@ -73,7 +77,7 @@ class GenericTranslator:
         module = self._create_module(scheme_params, type_builder)
 
         # Create function containing the operations
-        func = self._create_function(operations, type_builder, function_name)
+        func = self._create_function(operations, type_builder, function_name, num_inputs)
         func.update_function_type()
         module.body.block.add_op(func)
         fixes_applied = fix_encode_operations(module, type_builder)
@@ -94,9 +98,19 @@ class GenericTranslator:
         return ModuleOp([], attributes)
 
     def _create_function(
-        self, operations: List[FHEOperation], type_builder: TypeBuilder, function_name: str
+        self,
+        operations: List[FHEOperation],
+        type_builder: TypeBuilder,
+        function_name: str,
+        num_inputs: int = 1,
     ) -> FuncOp:
-        """Create a function with simple sequential operation processing."""
+        """Create a function with simple sequential operation processing.
+
+        `num_inputs` controls the function arity: each forward() placeholder
+        becomes one ciphertext function argument. Single-input models
+        register the legacy `__input__` sentinel; multi-input models also
+        register `__input_0__`, `__input_1__`, … pointing at args[0], args[1].
+        """
 
         # Setup function. The model input is encrypted at Orion's
         # `input_level`, not at MaxLevel — Orion's compiler picks this per
@@ -104,17 +118,27 @@ class GenericTranslator:
         # input-level type for the function arg; subsequent ops will type-
         # propagate from there.
         input_type = type_builder.get_input_ciphertext_type()
-        func_type = FunctionType.from_lists([input_type], [input_type])
+        func_type = FunctionType.from_lists(
+            [input_type] * num_inputs, [input_type]
+        )
         func = FuncOp(name=function_name, function_type=func_type, region=Region.DEFAULT)
         entry_block = func.body.blocks.first
         func.arg_attrs = ArrayAttr([DictionaryAttr({}) for _ in range(len(entry_block.args))])
 
         # Simple constants dictionary - just stores operation results by name
         constants = {}
-        current_value = entry_block.args[0]  # Function input
-        # The orion frontend uses "@__input__" to mean "rewind current_value
-        # to the model input" at the start of a parallel branch.
-        constants["__input__"] = current_value
+        current_value = entry_block.args[0]  # First function input is the
+        # initial current_value. The orion frontend emits `__set_current__`
+        # at every layer that starts a parallel branch (single-input case)
+        # OR consumes an input other than the very-first one (multi-input
+        # case), so rewinding to a non-default input is always explicit.
+        if num_inputs == 1:
+            # Legacy single-input sentinel — keep working for ToyHELRM,
+            # orionMLP, ResNet, …
+            constants["__input__"] = current_value
+        else:
+            for i in range(num_inputs):
+                constants[f"__input_{i}__"] = entry_block.args[i]
 
         # Process operations one by one
         for i, operation in enumerate(operations):

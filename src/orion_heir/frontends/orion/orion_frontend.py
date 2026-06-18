@@ -117,6 +117,10 @@ class OrionFrontend(FrontendInterface):
 
     def __init__(self):
         """Initialize the Orion frontend with supported operations."""
+        # Populated by `extract_operations`: number of forward() placeholders
+        # the traced model has. 1 for single-arg models, >1 for multi-arg
+        # ones (e.g. CriteoHELRM's `forward(dense, expanded_sparse)`).
+        self.num_inputs: int = 1
         self._supported_operations = {
             # CKKS arithmetic operations
             "add": {
@@ -294,6 +298,30 @@ class OrionFrontend(FrontendInterface):
         # target -> fx node
         fx_node_by_target = {tgt: n for tgt, _, n in fx_call_nodes}
 
+        # Map placeholder names → "__input_<i>__" sentinels so multi-arg
+        # forwards (e.g. CriteoHELRM's `forward(dense, expanded_sparse)`)
+        # can be routed to the right function argument in the translator.
+        # Falls back to the single-input "__input__" sentinel when there's
+        # only one placeholder (preserves back-compat with all existing
+        # one-arg models).
+        placeholder_to_sentinel: dict = {}
+        try:
+            if _traced is not None:
+                placeholders = [
+                    n for n in _traced.graph.nodes if n.op == "placeholder"
+                ]
+                if len(placeholders) == 1:
+                    placeholder_to_sentinel[placeholders[0].name] = "__input__"
+                else:
+                    for i, p in enumerate(placeholders):
+                        placeholder_to_sentinel[p.name] = f"__input_{i}__"
+                # Cache the count on the frontend so callers (e.g. the
+                # translator and data exporter) can size their function
+                # signature / input-bin emission appropriately.
+                self.num_inputs = len(placeholders)
+        except Exception:  # pragma: no cover
+            pass
+
         # The set of layer names (named_modules form, dotted) that emit FHE
         # ops. Populated incrementally as we process the named_modules walk.
         emit_layers: set = set()
@@ -321,7 +349,10 @@ class OrionFrontend(FrontendInterface):
                     continue
                 seen.add(node.name)
                 if node.op == "placeholder":
-                    return "__input__"
+                    # For multi-input models, each placeholder maps to a
+                    # distinct sentinel (__input_0__, __input_1__, …); for
+                    # single-input models we keep the legacy __input__ name.
+                    return placeholder_to_sentinel.get(node.name, "__input__")
                 if node.op == "call_module":
                     target = node.target
                     # Walk emitted layers from longest prefix to shortest so
@@ -352,17 +383,22 @@ class OrionFrontend(FrontendInterface):
             # Decide whether we need to rewind `current_value` before this
             # layer's ops (or, for `Add`, hand it both operands).
             eff_input = _effective_input(name) if fx_call_nodes else None
-            # Map "model input" to None for comparison with last_emitted_layer.
-            eff_input_normalised = (
-                None if eff_input == "__input__" else eff_input
+            # Any of `__input__`, `__input_0__`, `__input_1__`, ... refers
+            # to a model placeholder rather than a previously-emitted layer;
+            # treat all of them as "model input" when comparing against
+            # last_emitted_layer.
+            is_input_sentinel = (
+                isinstance(eff_input, str)
+                and eff_input.startswith("__input")
             )
+            eff_input_normalised = None if is_input_sentinel else eff_input
             need_reset = (
                 eff_input is not None
                 and eff_input_normalised != last_emitted_layer
             )
             reset_target = (
-                "__input__"
-                if eff_input == "__input__"
+                eff_input
+                if is_input_sentinel
                 else f"{eff_input}_layer_output"
                 if eff_input is not None
                 else None
@@ -796,6 +832,15 @@ class OrionFrontend(FrontendInterface):
     def _get_linear_operations(self, layer: Any, layer_name: str) -> List[FHEOperation]:
         """
         Get operations for a Linear layer with proper diagonal data extraction.
+
+        Note: orion.compile sometimes attaches a `.bootstrapper` submodule to a
+        Linear (or Linear-derived layer like `on.Embedding`). That bootstrap
+        is meant to refresh the ciphertext AFTER the linear's matmul+bias,
+        before whatever consumes it next. We don't emit it here; the outer
+        `extract_operations` named_modules walk visits `<layer>.bootstrapper`
+        after this Linear has been processed and emits a bootstrap op via
+        the `elif layer_type == "Bootstrap"` branch — which puts it in the
+        right place in the op stream.
         """
         operations = []
         level = getattr(layer, "level", 1)
@@ -1343,6 +1388,18 @@ class OrionFrontend(FrontendInterface):
             prescaled_ref = f"{layer_name}_prescaled"
 
             # ── mult1: ct × prescale (scalar constant) ───────────────
+            # orion's `Mult` modules carry an internal `.bootstrapper`
+            # submodule when their forward needs a refresh before doing the
+            # multiplication (added by orion.compile when the level budget
+            # demands it). Emit those bootstrap ops first so the HEIR IR
+            # tracks the level drop correctly.
+            for sub_name, sub_mod in layer.mult1.named_modules():
+                if sub_name and sub_mod.__class__.__name__ == "Bootstrap":
+                    operations.extend(
+                        self._get_bootstrap_operations(
+                            f"{layer_name}.mult1.{sub_name}", sub_mod
+                        )
+                    )
             operations.append(
                 FHEOperation(
                     op_type="ckks.mul_scalar",
