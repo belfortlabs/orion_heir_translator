@@ -16,7 +16,6 @@ from xdsl.irdl import (
     irdl_attr_definition,
     irdl_op_definition,
     operand_def,
-    opt_prop_def,
     prop_def,
     result_def,
     traits_def,
@@ -45,7 +44,12 @@ class SchemeParamAttr(ParametrizedAttribute):
     """
     CKKS scheme parameters attribute.
 
-    Syntax: #ckks.scheme_param<logN = val, Q = [q1, q2, ...], P = [p1, p2, ...], logDefaultScale = val>
+    Syntax: #ckks.scheme_param<logN = val, Q = [q1, q2, ...], P = [p1, p2, ...], logDefaultScale = val[, bootstrapLogP = [p1, p2, ...]]>
+
+    `bootstrapLogP` is optional — empty array means "not set" and HEIR
+    falls back to Lattigo's default bootstrap LogP. Set this to orion's
+    `boot_params.LogP` (per-prime bit widths) to make orion-heir-lattigo
+    produce correct FHE output on bootstrapping models like HELRM.
     """
 
     name = "ckks.scheme_param"
@@ -54,6 +58,7 @@ class SchemeParamAttr(ParametrizedAttribute):
     Q: ParameterDef[ArrayAttr]  # Array of integers
     P: ParameterDef[ArrayAttr]  # Array of integers
     logDefaultScale: ParameterDef[IntegerAttr]
+    bootstrapLogP: ParameterDef[ArrayAttr]  # empty => unset
 
     @classmethod
     def parse_parameters(cls, parser: Parser) -> Sequence[Attribute]:
@@ -112,9 +117,26 @@ class SchemeParamAttr(ParametrizedAttribute):
         logDefaultScale_value = parser.parse_integer()
         logDefaultScale_attr = IntegerAttr.from_int_and_width(logDefaultScale_value, 64)
 
+        # Optional "bootstrapLogP = [val1, val2, ...]"
+        bootstrapLogP_attrs: list[IntegerAttr] = []
+        if parser.parse_optional_punctuation(","):
+            parser.parse_keyword("bootstrapLogP")
+            parser.parse_punctuation("=")
+            parser.parse_punctuation("[")
+            bootstrapLogP_values = [parser.parse_integer()]
+            while parser.parse_optional_punctuation(","):
+                bootstrapLogP_values.append(parser.parse_integer())
+            parser.parse_punctuation("]")
+            bootstrapLogP_attrs = [
+                IntegerAttr.from_int_and_width(v, 32) for v in bootstrapLogP_values
+            ]
+        bootstrapLogP_array = ArrayAttr(bootstrapLogP_attrs)
+
         parser.parse_punctuation(">")
 
-        return [logN_attr, Q_array, P_array, logDefaultScale_attr]
+        return [
+            logN_attr, Q_array, P_array, logDefaultScale_attr, bootstrapLogP_array,
+        ]
 
     def print_parameters(self, printer: Printer) -> None:
         """Print CKKS scheme parameters."""
@@ -136,6 +158,15 @@ class SchemeParamAttr(ParametrizedAttribute):
 
         printer.print_string("], logDefaultScale = ")
         printer.print_string(str(self.logDefaultScale.value.data))
+
+        if len(self.bootstrapLogP.data) > 0:
+            printer.print_string(", bootstrapLogP = [")
+            for i, p_val in enumerate(self.bootstrapLogP.data):
+                if i > 0:
+                    printer.print_string(", ")
+                printer.print_string(str(p_val.value.data))
+            printer.print_string("]")
+
         printer.print_string(">")
 
 
@@ -423,11 +454,6 @@ class BootstrapOp(IRDLOperation):
 
     input = operand_def(LWECiphertextType)
     result = result_def(LWECiphertextType)
-
-    # Optional sparse-bootstrap slot count (refresh 2^logSlots slots instead of
-    # all). Threaded into HEIR's ckks.bootstrap so LWEToLattigo can dispatch to
-    # a per-logSlots bootstrap evaluator.
-    logSlots = opt_prop_def(IntegerAttr)
 
     irdl_options = [ParsePropInAttrDict()]
 

@@ -163,7 +163,7 @@ class CKKSArithmeticHandler(BaseOperationHandler):
             # current_value. Mixing in current_value silently fed the
             # downstream chain (bot_l_5's own output) into the merge.
             explicit = []
-            for arg in (operation.args or []):
+            for arg in operation.args or []:
                 if isinstance(arg, str) and arg.startswith("@"):
                     ref = arg[1:]
                     if ref in constants:
@@ -260,10 +260,14 @@ class CKKSMulHandler(BaseOperationHandler):
         result_type = type_builder.infer_result_type(
             "mul",
             current_value.type,
-            other_operand.type if hasattr(other_operand, "type") else current_value.type,
+            other_operand.type
+            if hasattr(other_operand, "type")
+            else current_value.type,
         )
 
-        mul_op = MulOp(operands=[current_value, other_operand], result_types=[result_type])
+        mul_op = MulOp(
+            operands=[current_value, other_operand], result_types=[result_type]
+        )
         block.add_op(mul_op)
 
         # 2. Add relinearization to reduce dimension back to 2
@@ -283,12 +287,16 @@ class CKKSMulHandler(BaseOperationHandler):
 
         # 3. Add rescale operation to reduce scaling factor back to original
         original_scale = type_builder.get_scaling_factor(current_value.type)
-        rescaled_type = type_builder.create_rescaled_type(relin_op.results[0].type, original_scale)
+        rescaled_type = type_builder.create_rescaled_type(
+            relin_op.results[0].type, original_scale
+        )
 
         rescale_op = RescaleOp(
             operands=[relin_op.results[0]],
             result_types=[rescaled_type],
-            properties={"to_ring": type_builder.get_next_modulus_ring(relin_op.results[0].type)},
+            properties={
+                "to_ring": type_builder.get_next_modulus_ring(relin_op.results[0].type)
+            },
         )
         block.add_op(rescale_op)
         return rescale_op.results[0]
@@ -325,11 +333,15 @@ class CKKSPlaintextHandler(BaseOperationHandler):
                     {
                         "orion.layer_name": StringAttr(layer_name),
                         "orion.layer_role": StringAttr("bias"),
-                        "orion.level": IntegerAttr.from_int_and_width(operation.level, 64),
+                        "orion.level": IntegerAttr.from_int_and_width(
+                            operation.level, 64
+                        ),
                     }
                 ),
             )
-            cleartext = block.insert_arg(arg_type=new_argument_type, index=new_arg_index)
+            cleartext = block.insert_arg(
+                arg_type=new_argument_type, index=new_arg_index
+            )
             func_op.properties["arg_attrs"] = ArrayAttr(new_arg_attrs)
             func_op.update_function_type()
         else:
@@ -385,7 +397,9 @@ class CKKSPlaintextHandler(BaseOperationHandler):
         # Pipeline blocks are separate row-block ciphertext IDs from the previous
         # multi-row-block linear transform; each needs its own bias chunk argument.
         if operation.metadata["operation"] == "bias_addition":
-            pipeline_keys = sorted(k for k in constants if k.startswith("__pipeline_block_"))
+            pipeline_keys = sorted(
+                k for k in constants if k.startswith("__pipeline_block_")
+            )
             for chunk_idx, key in enumerate(pipeline_keys, start=1):
                 ct_pipeline = constants[key]
                 ct_pipeline_ty = ct_pipeline.type
@@ -397,7 +411,9 @@ class CKKSPlaintextHandler(BaseOperationHandler):
                         {
                             "orion.layer_name": StringAttr(layer_name),
                             "orion.layer_role": StringAttr("bias"),
-                            "orion.level": IntegerAttr.from_int_and_width(operation.level, 64),
+                            "orion.level": IntegerAttr.from_int_and_width(
+                                operation.level, 64
+                            ),
                         }
                     ),
                 )
@@ -408,7 +424,9 @@ class CKKSPlaintextHandler(BaseOperationHandler):
                 func_op.update_function_type()
 
                 # Encode and add to the pipeline block
-                plaintext_type_chunk = LWEPlaintextType([ct_pipeline_ty.plaintext_space])
+                plaintext_type_chunk = LWEPlaintextType(
+                    [ct_pipeline_ty.plaintext_space]
+                )
                 encode_chunk = RLWEEncodeOp(
                     operands=[cleartext_chunk],
                     result_types=[plaintext_type_chunk],
@@ -598,7 +616,9 @@ class OperationRegistry:
 
         try:
             if hasattr(handler, "handle"):
-                return handler.handle(operation, current_value, block, constants, type_builder)
+                return handler.handle(
+                    operation, current_value, block, constants, type_builder
+                )
             else:
                 return handler(operation, current_value, block, constants, type_builder)
         except Exception as e:
@@ -640,7 +660,13 @@ class LinearTransformHandler(BaseOperationHandler):
         # Create multiple linear transform operations - one per block
         if layer and hasattr(layer, "diagonals") and layer.diagonals:
             lt_result = self._handle_blocked_linear_transform(
-                operation, current_value, block, constants, type_builder, layer, orion_metadata
+                operation,
+                current_value,
+                block,
+                constants,
+                type_builder,
+                layer,
+                orion_metadata,
             )
         else:
             # Fallback for single block or no diagonal data
@@ -652,7 +678,9 @@ class LinearTransformHandler(BaseOperationHandler):
         # This always rescales the main (first) result; extra pipeline blocks are
         # rescaled individually inside _handle_blocked_linear_transform.
         original_scale = type_builder.get_scaling_factor(current_value.type)
-        rescaled_type = type_builder.create_rescaled_type(lt_result.type, original_scale)
+        rescaled_type = type_builder.create_rescaled_type(
+            lt_result.type, original_scale
+        )
         rescale_op = RescaleOp(
             operands=[lt_result],
             result_types=[rescaled_type],
@@ -748,11 +776,15 @@ class LinearTransformHandler(BaseOperationHandler):
         # (un-rescaled) result so handle() rescales it normally.
         original_scale = type_builder.get_scaling_factor(current_value.type)
         for i, row_result in enumerate(block_row_results[1:], start=1):
-            rescaled_type = type_builder.create_rescaled_type(row_result.type, original_scale)
+            rescaled_type = type_builder.create_rescaled_type(
+                row_result.type, original_scale
+            )
             rescale_op = RescaleOp(
                 operands=[row_result],
                 result_types=[rescaled_type],
-                properties={"to_ring": type_builder.get_next_modulus_ring(row_result.type)},
+                properties={
+                    "to_ring": type_builder.get_next_modulus_ring(row_result.type)
+                },
             )
             block.add_op(rescale_op)
             constants[f"__pipeline_block_{i}"] = rescale_op.results[0]
@@ -843,7 +875,9 @@ class LinearTransformHandler(BaseOperationHandler):
         func_op.properties["arg_attrs"] = ArrayAttr(new_arg_attrs)
         func_op.update_function_type()
 
-        attributes = self._create_block_attributes(block_key, diagonal_indices, orion_metadata)
+        attributes = self._create_block_attributes(
+            block_key, diagonal_indices, orion_metadata
+        )
         # Linear transform multiplies by encoded diagonals, doubling the scale.
         original_scale = type_builder.get_scaling_factor(input_tensor.type)
         # Lattigo's lintrans.EvaluateMany silently clamps the output level to
@@ -893,7 +927,9 @@ class LinearTransformHandler(BaseOperationHandler):
 
         # Check for pipeline blocks stored by the previous layer's row-block evaluation
         if constants is not None:
-            pipeline_keys = sorted(k for k in constants if k.startswith("__pipeline_block_"))
+            pipeline_keys = sorted(
+                k for k in constants if k.startswith("__pipeline_block_")
+            )
             # current_value is the rescaled output of row block 0;
             # pipeline block N is the rescaled output of row block N.
             if len(pipeline_keys) + 1 == num_block_cols:
@@ -920,7 +956,9 @@ class LinearTransformHandler(BaseOperationHandler):
 
         result = block_results[0]
         for i in range(1, len(block_results)):
-            result = self._add_ciphertexts(result, block_results[i], block, type_builder)
+            result = self._add_ciphertexts(
+                result, block_results[i], block, type_builder
+            )
 
         return result
 
@@ -939,7 +977,9 @@ class LinearTransformHandler(BaseOperationHandler):
 
         # Diagonal information
         attributes["diagonal_count"] = IntegerAttr(len(diagonal_indices), i32)
-        attributes["diagonal_indices"] = DenseArrayBase.create_dense_int(i32, diagonal_indices)
+        attributes["diagonal_indices"] = DenseArrayBase.create_dense_int(
+            i32, diagonal_indices
+        )
 
         # Orion metadata
         if "slots" in orion_metadata:
@@ -976,7 +1016,9 @@ class LinearTransformHandler(BaseOperationHandler):
         block.add_op(linear_transform_op)
         return linear_transform_op.results[0]
 
-    def _extract_orion_metadata(self, operation: FHEOperation, type_builder: Any) -> Dict:
+    def _extract_orion_metadata(
+        self, operation: FHEOperation, type_builder: Any
+    ) -> Dict:
         """Extract Orion-specific metadata from the operation."""
         import math
 
@@ -1009,13 +1051,21 @@ class LinearTransformHandler(BaseOperationHandler):
         self, orion_metadata: Dict, operation: FHEOperation
     ) -> Dict:
         """Create MLIR attributes from Orion metadata."""
-        from xdsl.dialects.builtin import IntegerAttr, IntegerType, FloatAttr, f64, StringAttr
+        from xdsl.dialects.builtin import (
+            IntegerAttr,
+            IntegerType,
+            FloatAttr,
+            f64,
+            StringAttr,
+        )
 
         attributes = {}
 
         # Core parameters
         if "diagonal_count" in orion_metadata:
-            attributes["diagonal_count"] = IntegerAttr(orion_metadata["diagonal_count"], i32)
+            attributes["diagonal_count"] = IntegerAttr(
+                orion_metadata["diagonal_count"], i32
+            )
 
         if "layer" in orion_metadata:
             attributes["layer_name"] = StringAttr(orion_metadata["layer"])
@@ -1024,10 +1074,14 @@ class LinearTransformHandler(BaseOperationHandler):
             attributes["bsgs_ratio"] = FloatAttr(orion_metadata["bsgs_ratio"], f64)
 
         if "baby_step_size" in orion_metadata:
-            attributes["baby_step_size"] = IntegerAttr(orion_metadata["baby_step_size"], i32)
+            attributes["baby_step_size"] = IntegerAttr(
+                orion_metadata["baby_step_size"], i32
+            )
 
         if "giant_step_size" in orion_metadata:
-            attributes["giant_step_size"] = IntegerAttr(orion_metadata["giant_step_size"], i32)
+            attributes["giant_step_size"] = IntegerAttr(
+                orion_metadata["giant_step_size"], i32
+            )
 
         if "slots" in orion_metadata:
             attributes["slots"] = IntegerAttr(orion_metadata["slots"], i32)
@@ -1047,9 +1101,7 @@ class LinearTransformHandler(BaseOperationHandler):
 class CKKSQuadHandler(BaseOperationHandler):
     """Handler for CKKS quadratic activation operations."""
 
-    def _apply_quad(
-        self, ct: SSAValue, block: Block, type_builder: Any
-    ) -> SSAValue:
+    def _apply_quad(self, ct: SSAValue, block: Block, type_builder: Any) -> SSAValue:
         """Apply x*x + relin + rescale to a single ciphertext SSAValue."""
         result_type = type_builder.infer_result_type_with_relinearization(
             "mul", ct.type, ct.type
@@ -1071,11 +1123,15 @@ class CKKSQuadHandler(BaseOperationHandler):
         block.add_op(relin_op)
 
         original_scale = type_builder.get_scaling_factor(ct.type)
-        rescaled_type = type_builder.create_rescaled_type(relin_op.results[0].type, original_scale)
+        rescaled_type = type_builder.create_rescaled_type(
+            relin_op.results[0].type, original_scale
+        )
         rescale_op = RescaleOp(
             operands=[relin_op.results[0]],
             result_types=[rescaled_type],
-            properties={"to_ring": type_builder.get_next_modulus_ring(relin_op.results[0].type)},
+            properties={
+                "to_ring": type_builder.get_next_modulus_ring(relin_op.results[0].type)
+            },
         )
         block.add_op(rescale_op)
         return rescale_op.results[0]
@@ -1257,10 +1313,8 @@ class CKKSMulScalarHandler(BaseOperationHandler):
             result = mul_op.results[0]
         else:
             original_scale = type_builder.get_scaling_factor(ct_ty)
-            doubled_scale_type = (
-                type_builder.create_ciphertext_type_with_updated_scale(
-                    ct_ty, original_scale * 2
-                )
+            doubled_scale_type = type_builder.create_ciphertext_type_with_updated_scale(
+                ct_ty, original_scale * 2
             )
             mul_op = MulPlainOp(
                 operands=[current_value, plaintext],
@@ -1276,9 +1330,7 @@ class CKKSMulScalarHandler(BaseOperationHandler):
                 operands=[mul_result],
                 result_types=[rescaled_type],
                 properties={
-                    "to_ring": type_builder.get_next_modulus_ring(
-                        mul_result.type
-                    )
+                    "to_ring": type_builder.get_next_modulus_ring(mul_result.type)
                 },
             )
             block.add_op(rescale_op)
@@ -1300,25 +1352,20 @@ class CKKSBootstrapHandler(BaseOperationHandler):
         constants: Dict[str, SSAValue],
         type_builder: Any,
     ) -> SSAValue:
-        """Handle bootstrap (refresh) operation."""
-        from xdsl.dialects.builtin import IntegerAttr, i64
+        """Handle bootstrap (refresh) operation.
 
+        We always emit a full bootstrap (no `logSlots` attribute → HEIR defaults
+        to `LogSlots = LogN-1`). Orion's per-layer sparse bootstrap relies on
+        the baahl-nyu Lattigo fork's protocol (LogDimensions hint + post-Mul
+        compensation, see orion/backend/lattigo/bootstrapper.go:60-80); upstream
+        tuneinsight Lattigo behaves differently under the same protocol and
+        silently produces wrong values, so we drop the sparse hint here.
+        """
         from orion_heir.dialects.ckks import BootstrapOp
-
-        result_type = type_builder.get_default_ciphertext_type()
-
-        # Propagate the per-call sparse `log_slots` (if known) so HEIR builds a
-        # dedicated bootstrap evaluator at the matching slot count. HELRM
-        # relies on this — its level budget assumes sparse bootstraps.
-        properties: Dict[str, Any] = {}
-        log_slots = operation.metadata.get("log_slots") if operation.metadata else None
-        if log_slots is not None:
-            properties["logSlots"] = IntegerAttr(int(log_slots), i64)
 
         bootstrap_op = BootstrapOp(
             operands=[current_value],
-            result_types=[result_type],
-            properties=properties,
+            result_types=[type_builder.get_default_ciphertext_type()],
         )
         block.add_op(bootstrap_op)
         if operation.result_var:

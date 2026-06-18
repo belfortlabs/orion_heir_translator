@@ -99,13 +99,15 @@ class TypeBuilder:
             IntegerAttr(len(moduli) - 1, IntegerType(32)),  # current level
         ])
 
-        # CKKS scheme parameters
+        # per-prime bit widths for the bootstrap circuit's auxiliary modulus
+        boot_log_p = getattr(self.scheme_params, "boot_log_p", None) or []
         self.scheme_param = SchemeParamAttr(
             [
                 IntegerAttr(getattr(self.scheme_params, "log_n", 13), IntegerType(32)),
                 ArrayAttr([IntegerAttr(mod, IntegerType(64)) for mod in moduli]),
                 ArrayAttr([IntegerAttr(mod, IntegerType(64)) for mod in aux_moduli]),
                 IntegerAttr(getattr(self.scheme_params, "log_scale", 40), IntegerType(32)),
+                ArrayAttr([IntegerAttr(p, IntegerType(32)) for p in boot_log_p]),
             ]
         )
 

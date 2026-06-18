@@ -1512,15 +1512,10 @@ class OrionFrontend(FrontendInterface):
         """
         Get operations for a Bootstrap layer.
 
-        Bootstrap refreshes the ciphertext by reducing noise and resetting level.
-        When the layer's `fhe_input_shape` is known and packs fewer elements
-        than the full slot count, emit a sparse bootstrap request via the
-        `logSlots` metadata key; HEIR will then build a dedicated bootstrap
-        evaluator per distinct slot count (HELRM needs this — its level budget
-        is calibrated to sparse bootstraps).
+        Always emits a full bootstrap. (Orion's sparse bootstrap depends on a
+        baahl-nyu-Lattigo-fork protocol that upstream tuneinsight Lattigo does
+        not implement compatibly — see CKKSBootstrapHandler.)
         """
-        import math
-
         operations = []
 
         metadata: Dict[str, Any] = {
@@ -1529,11 +1524,6 @@ class OrionFrontend(FrontendInterface):
             "layer_type": "Bootstrap",
             "purpose": "level_reset",
         }
-        if layer is not None and getattr(layer, "fhe_input_shape", None) is not None:
-            elements = int(layer.fhe_input_shape.numel())
-            if elements > 0:
-                log_slots = int(math.ceil(math.log2(max(elements, 1))))
-                metadata["log_slots"] = log_slots
 
         operations.append(
             FHEOperation(
