@@ -366,6 +366,91 @@ class OrionFrontend(FrontendInterface):
                 queue.extend(node.all_input_nodes)
             return None
 
+        def _resolve_to_emitted(node):
+            """Resolve a single fx node to the emitted layer that produced its
+            value, recursing through `call_function`/`get_attr` wrappers.
+
+            Orion encodes an identity residual skip as ``x * 1`` — a
+            `call_function` mul node — so an `Add` operand is frequently not a
+            direct `call_module`. Without recursing through the wrapper the
+            skip branch is silently dropped and the residual connection is lost
+            (observed: TCN blocks 1-3 dropped their skip, ~23% output error).
+            """
+            seen: set = set()
+            queue = list([node])
+            while queue:
+                nd = queue.pop(0)
+                if nd.name in seen:
+                    continue
+                seen.add(nd.name)
+                if nd.op == "placeholder":
+                    return placeholder_to_sentinel.get(nd.name, "__input__")
+                if nd.op == "call_module":
+                    tgt = nd.target
+                    for L in sorted(emit_layers, key=len, reverse=True):
+                        if tgt == L or tgt.startswith(L + "."):
+                            return L
+                # Unresolved module, or a call_function/get_attr wrapper: walk
+                # its data-flow inputs (e.g. the `x` inside `x * 1`). Warn if a
+                # non-identity scalar multiply is being dropped on the way.
+                if nd.op == "call_function" and "mul" in str(nd.target):
+                    scalars = [a for a in nd.args if isinstance(a, (int, float))]
+                    if any(c != 1 for c in scalars):
+                        print(
+                            f"⚠️  residual skip through {nd.name} scales by "
+                            f"{scalars}; scalar not applied (assuming identity)"
+                        )
+                queue.extend(nd.all_input_nodes)
+            return None
+
+        # ── Emit in fx execution (topological) order ──────────────────────
+        # `named_modules()` yields *registration* order. For residual blocks
+        # that places the merge `Add` — and the refresh `.bootstrapper` Orion
+        # attaches to it — AFTER the post-residual activation, even though the
+        # fx graph runs the Add (and its bootstrap) first. Emitting in
+        # registration order then strands the activation on a stale,
+        # un-refreshed operand: the `__set_current__` rewind can't resolve a
+        # producer that hasn't been emitted yet, so the activation starts at
+        # the wrong (low) level, runs its Chebyshev/mult chain out of modulus
+        # levels, and bottoms out at level 0 where the mandatory post-mul
+        # rescale is illegal (HEIR's ckks.rescale verifier rejects it).
+        #
+        # Reorder so producers always precede consumers. Key each module by
+        # the earliest fx call_module index that belongs to it (its own node,
+        # a nested child for composites like ReLU, or its parent for a
+        # `.bootstrapper` helper). Forward-fill untraced layers from their
+        # registration predecessor, and break ties by registration index so
+        # a parent always sorts before its children (required by the
+        # `handled_names` subtree-marking and composite extraction below).
+        if fx_call_nodes:
+            fx_pos: dict = {}
+            for _idx, (_tgt, _, _) in enumerate(fx_call_nodes):
+                fx_pos.setdefault(_tgt, _idx)
+
+            def _earliest_fx_index(layer_path: str):
+                best = None
+                for tgt, idx in fx_pos.items():
+                    if (
+                        layer_path == tgt
+                        or layer_path.startswith(tgt + ".")
+                        or tgt.startswith(layer_path + ".")
+                    ):
+                        if best is None or idx < best:
+                            best = idx
+                return best
+
+            _decorated = []
+            _last_key = -1
+            for _reg, (_name, _layer) in enumerate(all_layers):
+                _key = _earliest_fx_index(_name)
+                if _key is None:
+                    _key = _last_key  # inherit registration predecessor's slot
+                else:
+                    _last_key = _key
+                _decorated.append((_key, _reg, _name, _layer))
+            _decorated.sort(key=lambda d: (d[0], d[1]))
+            all_layers = [(d[2], d[3]) for d in _decorated]
+
         # The layer whose result is currently in `current_value`. We only
         # emit a __set_current__ when the next layer's effective input
         # differs from this.
@@ -465,18 +550,12 @@ class OrionFrontend(FrontendInterface):
                     anchor = fx_node_by_target.get(name)
                     if anchor is not None:
                         for inp in anchor.all_input_nodes:
-                            if inp.op == "call_module":
-                                # Map fx target back to an emitted layer.
-                                tgt = inp.target
-                                resolved = None
-                                for L in sorted(
-                                    emit_layers, key=len, reverse=True
-                                ):
-                                    if tgt == L or tgt.startswith(L + "."):
-                                        resolved = L
-                                        break
-                                if resolved is not None:
-                                    add_parents.append(resolved)
+                            # Recurse through call_function/get_attr wrappers
+                            # (e.g. the `x * 1` identity skip) so residual
+                            # operands resolve to their producing layer.
+                            resolved = _resolve_to_emitted(inp)
+                            if resolved is not None:
+                                add_parents.append(resolved)
                     layer_ops = self._get_add_operations(
                         layer, name, parents=add_parents
                     )
