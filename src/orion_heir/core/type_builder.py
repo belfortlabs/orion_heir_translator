@@ -110,12 +110,35 @@ class TypeBuilder:
         )
 
     def get_default_ciphertext_type(self):
-        """Get the default ciphertext type at maximum level."""
+        """Get the default ciphertext type at maximum level.
+
+        Used for "fresh" ciphertexts — Bootstrap outputs, etc. Lattigo's
+        bootstrap returns at ResidualParameters.MaxLevel() so this matches
+        runtime. The model input is different and goes through
+        `get_input_ciphertext_type()`.
+        """
         from orion_heir.dialects.lwe import LWECiphertextType
 
         return LWECiphertextType([
             self.base_pt_space, self.ct_space, self.key, self.mod_chain
         ])
+
+    def get_input_ciphertext_type(self):
+        """Get the ciphertext type for the model input, at Orion's
+        `input_level`. Orion's auto-bootstrap algorithm picks `input_level`
+        per model so the first LT runs at its assigned `orion_level` (no
+        Lattigo-side clamp). Without this, TypeBuilder predicts the input
+        at MaxLevel and any branch that doesn't pass through a bootstrap
+        before reaching a merge ends up with a predicted level much higher
+        than runtime, so align_levels later emits a level_reduce(N) that
+        underflows at runtime.
+        """
+        from orion_heir.dialects.lwe import LWECiphertextType
+
+        input_level = getattr(self.scheme_params, "input_level", None)
+        if input_level is None:
+            return self.get_default_ciphertext_type()
+        return self.create_ciphertext_type_at_level(int(input_level))
 
     def get_default_plaintext_type(self):
         """Get the default plaintext type."""

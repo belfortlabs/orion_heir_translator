@@ -157,7 +157,33 @@ class CKKSArithmeticHandler(BaseOperationHandler):
         """Handle CKKS arithmetic operations."""
         # Determine operands
         if operation.op_type in ["add", "sub"]:
-            # Binary operations - need second operand
+            # If the frontend gave us two explicit `@ref` operands (e.g. the
+            # merging Add for HELRM's bot_l ∥ embs parallel branches), use
+            # both as the binary operands instead of pulling one from
+            # current_value. Mixing in current_value silently fed the
+            # downstream chain (bot_l_5's own output) into the merge.
+            explicit = []
+            for arg in (operation.args or []):
+                if isinstance(arg, str) and arg.startswith("@"):
+                    ref = arg[1:]
+                    if ref in constants:
+                        explicit.append(constants[ref])
+
+            if len(explicit) >= 2:
+                lhs, rhs = explicit[0], explicit[1]
+                lhs, rhs = align_levels(block, lhs, rhs, type_builder)
+                result_type = type_builder.infer_result_type(
+                    operation.op_type, lhs.type, rhs.type
+                )
+                op_instance = self.op_class(
+                    operands=[lhs, rhs], result_types=[result_type]
+                )
+                block.add_op(op_instance)
+                return op_instance.results[0]
+
+            # Otherwise fall through to the legacy single-explicit-operand
+            # path: current_value is one operand, the other comes from a
+            # single @ref or pt_ constant.
             second_operand = self._get_second_operand(operation, constants)
             if second_operand is None:
                 # If no second operand, return current value unchanged
@@ -818,11 +844,27 @@ class LinearTransformHandler(BaseOperationHandler):
         func_op.update_function_type()
 
         attributes = self._create_block_attributes(block_key, diagonal_indices, orion_metadata)
-        # Linear transform multiplies by encoded diagonals, doubling the scale
+        # Linear transform multiplies by encoded diagonals, doubling the scale.
         original_scale = type_builder.get_scaling_factor(input_tensor.type)
+        # Lattigo's lintrans.EvaluateMany silently clamps the output level to
+        # min(LevelQ, input.Level()) — i.e. when an LT runs on a ciphertext
+        # whose level is higher than the LT's `orion_level`, the output ct
+        # comes out at the LT's level, not the input's. If we don't model
+        # this in the static type, predicted levels diverge from runtime for
+        # every LT that gets fed a higher-level input, and downstream
+        # align_levels emits level_reduce(N) ops that underflow at runtime.
+        in_lvl = _get_ct_level(input_tensor)
+        orion_level = orion_metadata.get("orion_level")
+        clamped_lvl = in_lvl
+        if in_lvl is not None and orion_level is not None:
+            clamped_lvl = min(int(in_lvl), int(orion_level))
         result_type = type_builder.create_ciphertext_type_with_updated_scale(
             input_tensor.type, original_scale * 2
         )
+        if clamped_lvl is not None and clamped_lvl != in_lvl:
+            result_type = type_builder.create_ciphertext_type_with_updated_level(
+                result_type, clamped_lvl
+            )
         linear_transform_op = LinearTransformOp(
             operands=[input_tensor, inserted_diagonals_block_arg],
             result_types=[result_type],
@@ -1259,10 +1301,25 @@ class CKKSBootstrapHandler(BaseOperationHandler):
         type_builder: Any,
     ) -> SSAValue:
         """Handle bootstrap (refresh) operation."""
+        from xdsl.dialects.builtin import IntegerAttr, i64
+
         from orion_heir.dialects.ckks import BootstrapOp
 
         result_type = type_builder.get_default_ciphertext_type()
-        bootstrap_op = BootstrapOp(operands=[current_value], result_types=[result_type])
+
+        # Propagate the per-call sparse `log_slots` (if known) so HEIR builds a
+        # dedicated bootstrap evaluator at the matching slot count. HELRM
+        # relies on this — its level budget assumes sparse bootstraps.
+        properties: Dict[str, Any] = {}
+        log_slots = operation.metadata.get("log_slots") if operation.metadata else None
+        if log_slots is not None:
+            properties["logSlots"] = IntegerAttr(int(log_slots), i64)
+
+        bootstrap_op = BootstrapOp(
+            operands=[current_value],
+            result_types=[result_type],
+            properties=properties,
+        )
         block.add_op(bootstrap_op)
         if operation.result_var:
             constants[operation.result_var] = bootstrap_op.results[0]

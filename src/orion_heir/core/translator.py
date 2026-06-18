@@ -98,8 +98,12 @@ class GenericTranslator:
     ) -> FuncOp:
         """Create a function with simple sequential operation processing."""
 
-        # Setup function
-        input_type = type_builder.get_default_ciphertext_type()
+        # Setup function. The model input is encrypted at Orion's
+        # `input_level`, not at MaxLevel — Orion's compiler picks this per
+        # model so the first LT runs at its assigned orion_level. Use the
+        # input-level type for the function arg; subsequent ops will type-
+        # propagate from there.
+        input_type = type_builder.get_input_ciphertext_type()
         func_type = FunctionType.from_lists([input_type], [input_type])
         func = FuncOp(name=function_name, function_type=func_type, region=Region.DEFAULT)
         entry_block = func.body.blocks.first
@@ -108,10 +112,32 @@ class GenericTranslator:
         # Simple constants dictionary - just stores operation results by name
         constants = {}
         current_value = entry_block.args[0]  # Function input
+        # The orion frontend uses "@__input__" to mean "rewind current_value
+        # to the model input" at the start of a parallel branch.
+        constants["__input__"] = current_value
 
         # Process operations one by one
         for i, operation in enumerate(operations):
             print(f"  Processing operation {i+1}/{len(operations)}: {operation.op_type}")
+
+            # The orion frontend emits __set_current__ markers in front of
+            # layers that start a parallel branch (their fx-graph input is
+            # not the previously emitted layer's output). The op carries a
+            # single arg "@<name>" that we look up and use as the new
+            # current_value. No MLIR op is produced.
+            if operation.op_type == "__set_current__":
+                target = None
+                if operation.args:
+                    a0 = operation.args[0]
+                    if isinstance(a0, str) and a0.startswith("@"):
+                        target = a0[1:]
+                if target and target in constants:
+                    current_value = constants[target]
+                else:
+                    print(
+                        f"⚠️  __set_current__ target {target!r} not in constants; keeping current_value"
+                    )
+                continue
 
             # Get handler
             handler = self.operation_registry.handlers.get(operation.op_type)
@@ -128,6 +154,23 @@ class GenericTranslator:
                 # Store result by operation name
                 if operation.result_var:
                     constants[operation.result_var] = result
+
+                # Save the layer's "last output so far" under a stable name
+                # so subsequent branches / merges can reference it via
+                # `@<layer>_layer_output`. Multiple ops per layer overwrite;
+                # the final write reflects the layer's exit value.
+                # Also propagate the alias up the layer-name prefix chain
+                # (e.g. "bot_l.1.bootstrapper" -> "bot_l.1") so auxiliary
+                # management layers like ".bootstrapper" / ".mult1" hand
+                # their post-processed output to the logical parent that the
+                # fx graph identifies as the data-flow ancestor.
+                layer_for_alias = (operation.metadata or {}).get("layer")
+                if layer_for_alias and result is not None:
+                    constants[f"{layer_for_alias}_layer_output"] = result
+                    parts = layer_for_alias.split(".")
+                    for stop in range(len(parts) - 1, 0, -1):
+                        ancestor = ".".join(parts[:stop])
+                        constants[f"{ancestor}_layer_output"] = result
 
                 # Update current value only for non-encode operations
                 if operation.op_type != "encode":

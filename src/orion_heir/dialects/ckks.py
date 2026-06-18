@@ -16,6 +16,7 @@ from xdsl.irdl import (
     irdl_attr_definition,
     irdl_op_definition,
     operand_def,
+    opt_prop_def,
     prop_def,
     result_def,
     traits_def,
@@ -422,6 +423,13 @@ class BootstrapOp(IRDLOperation):
 
     input = operand_def(LWECiphertextType)
     result = result_def(LWECiphertextType)
+
+    # Optional sparse-bootstrap slot count (refresh 2^logSlots slots instead of
+    # all). Threaded into HEIR's ckks.bootstrap so LWEToLattigo can dispatch to
+    # a per-logSlots bootstrap evaluator.
+    logSlots = opt_prop_def(IntegerAttr)
+
+    irdl_options = [ParsePropInAttrDict()]
 
     traits = traits_def(Pure())
 

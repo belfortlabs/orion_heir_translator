@@ -235,6 +235,15 @@ class OrionFrontend(FrontendInterface):
 
         This method extracts the actual operations that Orion performs during
         FHE inference, including proper handling of fused operations.
+
+        It also walks Orion's fx trace to discover the model's actual DAG —
+        previously this method linearised parallel branches (HELRM's bot_l ∥
+        embs paths), silently dropping branch resets and binary merges. Now
+        each layer's effective FHE input is computed from its fx predecessors:
+        when that input is not whichever layer was just processed, we prepend
+        a `__set_current__` marker so the translator rewinds `current_value`
+        to the right SSA value. Binary merges (e.g. `Add`) get their two
+        operands wired up explicitly from the fx graph.
         """
         operations = []
 
@@ -256,6 +265,81 @@ class OrionFrontend(FrontendInterface):
         # Track sub-modules handled by composite operations (e.g. ReLU)
         handled_names: set = set()
 
+        # ── fx-graph topology ────────────────────────────────────────────
+        # Use Orion's traced fx graph (set by orion.fit) so the translator
+        # can see HELRM-style parallel branches and binary merges. Without
+        # this the named_modules() walk linearises the DAG and binary Adds
+        # silently degrade into no-ops.
+        fx_call_nodes = []  # list of (target, parents) — only call_module nodes
+        try:
+            from orion.core.orion import scheme as _orion_scheme
+
+            _traced = getattr(_orion_scheme, "traced", None)
+            if _traced is not None:
+                for node in _traced.graph.nodes:
+                    if node.op == "call_module":
+                        parent_specs = []
+                        for inp in node.all_input_nodes:
+                            if inp.op == "placeholder":
+                                parent_specs.append(("placeholder", None))
+                            elif inp.op == "call_module":
+                                parent_specs.append(("call_module", inp.target))
+                            # call_function / get_attr nodes (e.g. operator.mul)
+                            # are not tracked; effective_input recurses through
+                            # them.
+                        fx_call_nodes.append((node.target, parent_specs, node))
+        except Exception as _exc:  # pragma: no cover — defensive
+            print(f"⚠️  Could not fetch Orion fx graph for branch tracking: {_exc}")
+
+        # target -> fx node
+        fx_node_by_target = {tgt: n for tgt, _, n in fx_call_nodes}
+
+        # The set of layer names (named_modules form, dotted) that emit FHE
+        # ops. Populated incrementally as we process the named_modules walk.
+        emit_layers: set = set()
+
+        def _effective_input(layer_name: str) -> str:
+            """Walk fx predecessors of `layer_name` and return the name of the
+            earliest ancestor that emits FHE ops (or "__input__" for the
+            model placeholder, or None if no fx info is available)."""
+            anchor = fx_node_by_target.get(layer_name)
+            if anchor is None:
+                # Composite layer: find the first fx call_module whose target
+                # is nested inside this layer (topological order from the fx
+                # graph).
+                for tgt, _, node in fx_call_nodes:
+                    if tgt.startswith(layer_name + "."):
+                        anchor = node
+                        break
+            if anchor is None:
+                return None
+            seen: set = set()
+            queue = list(anchor.all_input_nodes)
+            while queue:
+                node = queue.pop(0)
+                if node.name in seen:
+                    continue
+                seen.add(node.name)
+                if node.op == "placeholder":
+                    return "__input__"
+                if node.op == "call_module":
+                    target = node.target
+                    # Walk emitted layers from longest prefix to shortest so
+                    # that ReLU sub-nodes like "bot_l.2.sign.acts.2" resolve
+                    # to "bot_l.2" rather than something shorter.
+                    candidates = sorted(emit_layers, key=len, reverse=True)
+                    for L in candidates:
+                        if target == L or target.startswith(L + "."):
+                            return L
+                # Not yet emitted; keep walking up.
+                queue.extend(node.all_input_nodes)
+            return None
+
+        # The layer whose result is currently in `current_value`. We only
+        # emit a __set_current__ when the next layer's effective input
+        # differs from this.
+        last_emitted_layer: str = None  # None => model input
+
         # Process each layer
         for name, layer in all_layers:
             if not name:  # Skip root module
@@ -265,9 +349,50 @@ class OrionFrontend(FrontendInterface):
 
             layer_type = layer.__class__.__name__
 
+            # Decide whether we need to rewind `current_value` before this
+            # layer's ops (or, for `Add`, hand it both operands).
+            eff_input = _effective_input(name) if fx_call_nodes else None
+            # Map "model input" to None for comparison with last_emitted_layer.
+            eff_input_normalised = (
+                None if eff_input == "__input__" else eff_input
+            )
+            need_reset = (
+                eff_input is not None
+                and eff_input_normalised != last_emitted_layer
+            )
+            reset_target = (
+                "__input__"
+                if eff_input == "__input__"
+                else f"{eff_input}_layer_output"
+                if eff_input is not None
+                else None
+            )
+
             # Check if this is a layer that should produce FHE operations
             if self._should_extract_layer(layer):
                 print(f"🔍 Processing layer: {name} ({layer_type})")
+
+                # If this layer starts a parallel branch (or otherwise
+                # consumes a value that isn't the previously emitted layer's
+                # output), prepend a __set_current__ marker so the translator
+                # rewinds `current_value`. `Add` is handled below as a true
+                # binary op; skip the implicit reset for it.
+                if need_reset and layer_type != "Add" and reset_target is not None:
+                    operations.append(
+                        FHEOperation(
+                            op_type="__set_current__",
+                            method_name="__set_current__",
+                            args=[f"@{reset_target}"],
+                            kwargs={},
+                            result_var=None,
+                            level=None,
+                            metadata={
+                                "operation": "branch_reset",
+                                "layer": name,
+                                "to": reset_target,
+                            },
+                        )
+                    )
 
                 # Get operations based on layer type
                 # Embedding is a Linear subclass (HE-LRM): same FHE op shape.
@@ -296,12 +421,34 @@ class OrionFrontend(FrontendInterface):
                             handled_names.add(f"{name}.{sub_name}")
 
                 elif layer_type == "Add":
-                    layer_ops = self._get_add_operations(layer, name)
+                    # Two parents in fx — emit a true binary add with both
+                    # operands wired up explicitly. The implicit
+                    # current_value path silently drops the second operand
+                    # and reduces the merge to a no-op (the HELRM blocker).
+                    add_parents = []
+                    anchor = fx_node_by_target.get(name)
+                    if anchor is not None:
+                        for inp in anchor.all_input_nodes:
+                            if inp.op == "call_module":
+                                # Map fx target back to an emitted layer.
+                                tgt = inp.target
+                                resolved = None
+                                for L in sorted(
+                                    emit_layers, key=len, reverse=True
+                                ):
+                                    if tgt == L or tgt.startswith(L + "."):
+                                        resolved = L
+                                        break
+                                if resolved is not None:
+                                    add_parents.append(resolved)
+                    layer_ops = self._get_add_operations(
+                        layer, name, parents=add_parents
+                    )
                     operations.extend(layer_ops)
                     found_layers.append(f"{name}(Add)")
 
                 elif layer_type == "Bootstrap":
-                    layer_ops = self._get_bootstrap_operations(name)
+                    layer_ops = self._get_bootstrap_operations(name, layer)
                     operations.extend(layer_ops)
                     found_layers.append(f"{name}(Bootstrap)")
 
@@ -352,6 +499,13 @@ class OrionFrontend(FrontendInterface):
 
                 else:
                     print(f"    ⚠️  Unknown layer type: {layer_type}")
+
+                # Record this layer as one that emits FHE ops so subsequent
+                # branch-reset / merge lookups can resolve fx targets back
+                # to it. This must happen AFTER the dispatch above so the
+                # current layer's own fx anchor doesn't resolve to itself.
+                emit_layers.add(name)
+                last_emitted_layer = name
             else:
                 # Layer doesn't produce FHE operations
                 if layer_type in [
@@ -561,7 +715,7 @@ class OrionFrontend(FrontendInterface):
         elif layer_type == "Add":
             return self._get_add_operations(layer, layer_name)
         elif layer_type == "Bootstrap":
-            return self._get_bootstrap_operations(layer_name)
+            return self._get_bootstrap_operations(layer_name, layer)
         elif layer_type == "Chebyshev":
             return self._get_chebyshev_operations(layer, layer_name)
         elif layer_type == "_Sign":
@@ -1221,7 +1375,7 @@ class OrionFrontend(FrontendInterface):
 
                     elif act_type == "Bootstrap":
                         boot_ops = self._get_bootstrap_operations(
-                            f"{layer_name}.sign.acts.{act_name}"
+                            f"{layer_name}.sign.acts.{act_name}", act
                         )
                         operations.extend(boot_ops)
 
@@ -1308,21 +1462,35 @@ class OrionFrontend(FrontendInterface):
 
         return operations
 
-    def _get_add_operations(self, layer: Any, layer_name: str) -> List[FHEOperation]:
+    def _get_add_operations(
+        self,
+        layer: Any,
+        layer_name: str,
+        parents: List[str] = None,
+    ) -> List[FHEOperation]:
         """
-        Get operations for an Add layer (used in residual connections).
+        Get operations for an Add layer (used in residual connections /
+        parallel-branch merges).
 
-        Add layer performs element-wise addition of two ciphertexts.
+        Add layer performs element-wise addition of two ciphertexts. The two
+        operands come from `parents` (each a previously emitted layer name,
+        resolved from Orion's fx trace). When parents are provided we emit
+        them as explicit `@<layer>_layer_output` refs so the translator can
+        find both operands; without them the handler would fall through to
+        a no-op (current_value unchanged), which silently breaks parallel
+        merges (HELRM's bot_l ∥ embs paths).
         """
         operations = []
         level = getattr(layer, "level", 1)
 
-        # Element-wise addition of two ciphertexts
+        parents = parents or []
+        # Build args list: at most two @refs (binary add).
+        args: List[str] = [f"@{p}_layer_output" for p in parents[:2]]
         operations.append(
             FHEOperation(
                 op_type="add",
                 method_name="add",
-                args=[],  # The actual operands will be filled in during execution
+                args=args,
                 kwargs={},
                 result_var=f"{layer_name}_result",
                 level=level,
@@ -1331,21 +1499,42 @@ class OrionFrontend(FrontendInterface):
                     "layer": layer_name,
                     "layer_type": "Add",
                     "purpose": "skip_connection",
+                    "parents": list(parents),
                 },
             )
         )
 
         return operations
 
-    def _get_bootstrap_operations(self, layer_name: str) -> List[FHEOperation]:
+    def _get_bootstrap_operations(
+        self, layer_name: str, layer: Any = None
+    ) -> List[FHEOperation]:
         """
         Get operations for a Bootstrap layer.
 
         Bootstrap refreshes the ciphertext by reducing noise and resetting level.
+        When the layer's `fhe_input_shape` is known and packs fewer elements
+        than the full slot count, emit a sparse bootstrap request via the
+        `logSlots` metadata key; HEIR will then build a dedicated bootstrap
+        evaluator per distinct slot count (HELRM needs this — its level budget
+        is calibrated to sparse bootstraps).
         """
+        import math
+
         operations = []
 
-        # Bootstrap operation
+        metadata: Dict[str, Any] = {
+            "operation": "noise_refresh",
+            "layer": layer_name,
+            "layer_type": "Bootstrap",
+            "purpose": "level_reset",
+        }
+        if layer is not None and getattr(layer, "fhe_input_shape", None) is not None:
+            elements = int(layer.fhe_input_shape.numel())
+            if elements > 0:
+                log_slots = int(math.ceil(math.log2(max(elements, 1))))
+                metadata["log_slots"] = log_slots
+
         operations.append(
             FHEOperation(
                 op_type="bootstrap",
@@ -1354,12 +1543,7 @@ class OrionFrontend(FrontendInterface):
                 kwargs={},
                 result_var=f"{layer_name}_refreshed",
                 level=5,  # Bootstrap typically resets to high level
-                metadata={
-                    "operation": "noise_refresh",
-                    "layer": layer_name,
-                    "layer_type": "Bootstrap",
-                    "purpose": "level_reset",
-                },
+                metadata=metadata,
             )
         )
 

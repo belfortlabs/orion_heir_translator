@@ -201,15 +201,25 @@ def generate_go_wrapper(
     manifest: ExportManifest,
     output_dir: Path,
     has_bootstrapping: bool = False,
+    num_bootstrap_evals: int = 0,
 ) -> None:
     """Generate model-specific Go wrapper ({func_name}_run.go) and main.go.
 
     All model-specific details (file paths, function name, argument arity,
     bootstrapping support) live only in the generated files so that main.go
     stays static across all models.
+
+    `num_bootstrap_evals` is the count of distinct `*bootstrapping.Evaluator`
+    parameters the heir-emitted function takes (one per sparse logSlots that
+    HEIR's LWEToLattigo pass discovered). When 0, defaults to 1 if
+    `has_bootstrapping` is true.
     """
     func_name = manifest.func_name
     arg_files = [(arg.file, arg.name) for arg in manifest.args]
+    if has_bootstrapping and num_bootstrap_evals == 0:
+        num_bootstrap_evals = 1
+    if num_bootstrap_evals > 0:
+        has_bootstrapping = True
 
     # ── Build {func_name}_run.go ─────────────────────────────────────
     imports = [
@@ -232,20 +242,29 @@ def generate_go_wrapper(
     arg_call = ", ".join(f"args[{i}]" for i in range(len(arg_files)))
 
     if has_bootstrapping:
+        bt_eval_names = [
+            f"bootstrappingEval{i}" if num_bootstrap_evals > 1 else "bootstrappingEval"
+            for i in range(num_bootstrap_evals)
+        ]
+        bt_eval_types = ", ".join("*bootstrapping.Evaluator" for _ in bt_eval_names)
+        bt_eval_vars = ", ".join(bt_eval_names)
+        bt_eval_sig = ", ".join(
+            f"{name} *bootstrapping.Evaluator" for name in bt_eval_names
+        )
         configure_ret = (
-            "(*bootstrapping.Evaluator, *ckks.Evaluator, ckks.Parameters, "
+            f"({bt_eval_types}, *ckks.Evaluator, ckks.Parameters, "
             "*ckks.Encoder, *rlwe.Encryptor, *rlwe.Decryptor)"
         )
         configure_vars = (
-            "bootstrappingEval, evaluator, params, encoder, encryptor, decryptor"
+            f"{bt_eval_vars}, evaluator, params, encoder, encryptor, decryptor"
         )
         run_sig = (
-            "bootstrappingEval *bootstrapping.Evaluator, "
+            f"{bt_eval_sig}, "
             "evaluator *ckks.Evaluator, params ckks.Parameters, "
             "encoder *ckks.Encoder,\n"
             "\tencryptor *rlwe.Encryptor, decryptor *rlwe.Decryptor"
         )
-        call_prefix = "bootstrappingEval, evaluator, params, encoder"
+        call_prefix = f"{bt_eval_vars}, evaluator, params, encoder"
     else:
         configure_ret = (
             "(*ckks.Evaluator, ckks.Parameters, "
@@ -268,6 +287,9 @@ def generate_go_wrapper(
         f"{imports_str}\n"
         f")\n"
         f"\n"
+        f"// Default input file when `run` is called without an explicit path\n"
+        f"// (single-example back-compat). The N-example harness in main.go\n"
+        f"// passes inputFile=data/input_<i>.bin to evaluate a sweep.\n"
         f'const inputFile = "{manifest.input["file"]}"\n'
         f"\n"
         f"var argFiles = []string{{\n"
@@ -291,8 +313,10 @@ def generate_go_wrapper(
         f"\treturn {func_name}__configure()\n"
         f"}}\n"
         f"\n"
-        f"func run({run_sig}) []float64 {{\n"
-        f"\tinputVec := loadF64(inputFile)\n"
+        f"// runOn evaluates the model on a specific input file. Used by the\n"
+        f"// N-example harness to amortise keygen across multiple inputs.\n"
+        f"func runOn({run_sig}, inputPath string) []float64 {{\n"
+        f"\tinputVec := loadF64(inputPath)\n"
         f"\targs := make([][]float64, len(argFiles))\n"
         f"\tfor i, f := range argFiles {{\n"
         f"\t\targs[i] = loadF64(f)\n"
@@ -316,6 +340,11 @@ def generate_go_wrapper(
         f"\t\tpanic(err)\n"
         f"\t}}\n"
         f"\treturn result\n"
+        f"}}\n"
+        f"\n"
+        f"// Single-example back-compat shim.\n"
+        f"func run({run_sig}) []float64 {{\n"
+        f"\treturn runOn({configure_vars}, inputFile)\n"
         f"}}\n"
     )
 

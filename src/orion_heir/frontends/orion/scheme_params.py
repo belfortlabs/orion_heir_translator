@@ -5,7 +5,7 @@ This module provides Orion-specific scheme parameter handling,
 including integration with the actual Orion library when available.
 """
 
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from orion_heir.core.types import SchemeParameters
 
@@ -35,6 +35,7 @@ class OrionSchemeParameters(SchemeParameters):
         backend: str = "lattigo",
         keys_path: str = "data/keys.h5",
         diags_path: str = "data/diagonals.h5",
+        input_level: Optional[int] = None,
     ):
         # Normalize logN to always be an integer for Orion
         self.logN = logN[0] if isinstance(logN, list) else logN
@@ -50,6 +51,15 @@ class OrionSchemeParameters(SchemeParameters):
         (mod, aux) = self._get_actual_primes()
         self.ciphertext_modulus_chain = mod
         self.auxiliary_modulus_chain = aux
+        # Level at which Orion encrypts the model input. Orion's
+        # auto-bootstrap algorithm picks this per-model so the first layer
+        # can run at its assigned `orion_level`. The translator's TypeBuilder
+        # needs this to set the input ciphertext type correctly; otherwise
+        # it defaults to MaxLevel and predicted levels diverge from runtime
+        # for any branch that doesn't pass through a bootstrap.
+        self.input_level = (
+            input_level if input_level is not None else len(mod) - 1
+        )
 
     @property
     def ring_degree(self) -> int:
