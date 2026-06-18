@@ -122,16 +122,17 @@ class SchemeParamAttr(ParametrizedAttribute):
         if parser.parse_optional_punctuation(","):
             parser.parse_keyword("bootstrapLogP")
             parser.parse_punctuation("=")
-parser.parse_punctuation("[")
-bootstrapLogP_values: list[int] = []
-if not parser.parse_optional_punctuation("]"):
-    bootstrapLogP_values.append(parser.parse_integer())
-    while parser.parse_optional_punctuation(","):
-        bootstrapLogP_values.append(parser.parse_integer())
-    parser.parse_punctuation("]")
-bootstrapLogP_attrs = [
-    IntegerAttr.from_int_and_width(v, 32) for v in bootstrapLogP_values
-]
+            parser.parse_punctuation("[")
+            bootstrapLogP_values: list[int] = []
+            if not parser.parse_optional_punctuation("]"):
+                bootstrapLogP_values.append(parser.parse_integer())
+                while parser.parse_optional_punctuation(","):
+                    bootstrapLogP_values.append(parser.parse_integer())
+                parser.parse_punctuation("]")
+            bootstrapLogP_attrs = [
+                IntegerAttr.from_int_and_width(v, 32) for v in bootstrapLogP_values
+            ]
+        bootstrapLogP_array = ArrayAttr(bootstrapLogP_attrs)
 
         parser.parse_punctuation(">")
 
