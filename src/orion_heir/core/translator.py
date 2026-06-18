@@ -52,7 +52,7 @@ class GenericTranslator:
         operations: List[FHEOperation],
         scheme_params: SchemeParameters,
         function_name: str = "fhe_computation",
-        num_inputs: int = 1,
+        num_inputs: int | None = None,
     ) -> ModuleOp:
         """
         Translate a list of FHE operations to HEIR MLIR.
@@ -62,8 +62,8 @@ class GenericTranslator:
             scheme_params: FHE scheme parameters
             function_name: Name for the generated function
             num_inputs: Number of ciphertext function arguments (= number of
-                forward() placeholders in the source model). Single-arg models
-                use 1; multi-arg models like CriteoHELRM use >1.
+                forward() placeholders in the source model). If omitted,
+                infer it from `__set_current__` input sentinels.
 
         Returns:
             Complete MLIR module containing the translated operations
@@ -77,7 +77,12 @@ class GenericTranslator:
         module = self._create_module(scheme_params, type_builder)
 
         # Create function containing the operations
-        func = self._create_function(operations, type_builder, function_name, num_inputs)
+        resolved_num_inputs = (
+            num_inputs if num_inputs is not None else self._infer_num_inputs(operations)
+        )
+        func = self._create_function(
+            operations, type_builder, function_name, resolved_num_inputs
+        )
         func.update_function_type()
         module.body.block.add_op(func)
         fixes_applied = fix_encode_operations(module, type_builder)
@@ -87,6 +92,26 @@ class GenericTranslator:
 
         print("✅ Translation completed")
         return module
+
+    def _infer_num_inputs(self, operations: List[FHEOperation]) -> int:
+        """Infer function arity from `__set_current__` references."""
+        max_input_index = 0
+        for operation in operations:
+            if operation.op_type != "__set_current__" or not operation.args:
+                continue
+
+            target = operation.args[0]
+            if not isinstance(target, str):
+                continue
+
+            if not (target.startswith("@__input_") and target.endswith("__")):
+                continue
+
+            suffix = target[len("@__input_") : -2]
+            if suffix.isdigit():
+                max_input_index = max(max_input_index, int(suffix))
+
+        return max_input_index + 1
 
     def _create_module(
         self, scheme_params: SchemeParameters, type_builder: TypeBuilder
