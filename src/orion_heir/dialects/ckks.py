@@ -351,6 +351,7 @@ class RescaleOp(IRDLOperation):
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
 
+
 @irdl_op_definition
 class LevelReduce(IRDLOperation):
     """

@@ -111,7 +111,7 @@ class GenericTranslator:
 
         # Process operations one by one
         for i, operation in enumerate(operations):
-            print(f"  Processing operation {i+1}/{len(operations)}: {operation.op_type}")
+            print(f"  Processing operation {i + 1}/{len(operations)}: {operation.op_type}")
 
             # Get handler
             handler = self.operation_registry.handlers.get(operation.op_type)

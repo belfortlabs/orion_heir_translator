@@ -316,9 +316,7 @@ class OrionFrontend(FrontendInterface):
                 elif layer_type == "BatchNorm1d":
                     # Check if BatchNorm is fused into adjacent Linear layer
                     if self._is_batchnorm_fused(layer):
-                        print(
-                            f"    ℹ️  BatchNorm {name} is fused into adjacent Linear layer"
-                        )
+                        print(f"    ℹ️  BatchNorm {name} is fused into adjacent Linear layer")
                         found_layers.append(f"{name}(BatchNorm1d-fused)")
                     else:
                         layer_ops = self._get_batchnorm_operations(layer, name)
@@ -393,11 +391,7 @@ class OrionFrontend(FrontendInterface):
 
         # Composite ReLU (has prescale + sign + mult sub-modules)
         if layer_type == "ReLU":
-            if (
-                hasattr(layer, "sign")
-                and hasattr(layer, "mult1")
-                and hasattr(layer, "mult2")
-            ):
+            if hasattr(layer, "sign") and hasattr(layer, "mult1") and hasattr(layer, "mult2"):
                 return True  # Handle as composite even without a level
             return not self._is_layer_fused(layer)
 
@@ -666,9 +660,7 @@ class OrionFrontend(FrontendInterface):
             orion_metadata["bsgs_ratio"] = layer.bsgs_ratio
 
         if hasattr(layer, "scheme") and hasattr(layer.scheme, "params"):
-            embedding_method = getattr(
-                layer.scheme.params, "embedding_method", "hybrid"
-            )
+            embedding_method = getattr(layer.scheme.params, "embedding_method", "hybrid")
             orion_metadata["embedding_method"] = embedding_method
 
             if hasattr(layer.scheme.params, "get_slots"):
@@ -776,9 +768,7 @@ class OrionFrontend(FrontendInterface):
             if isinstance(diag_data, torch.Tensor):
                 diagonal_list.append(diag_data.flatten())
             elif isinstance(diag_data, (list, np.ndarray)):
-                diagonal_list.append(
-                    torch.tensor(diag_data, dtype=torch.float32).flatten()
-                )
+                diagonal_list.append(torch.tensor(diag_data, dtype=torch.float32).flatten())
             else:
                 print(f"         ❌ Unknown diagonal type: {type(diag_data)}")
                 continue
@@ -933,9 +923,7 @@ class OrionFrontend(FrontendInterface):
 
         return operations
 
-    def _get_batchnorm_operations(
-        self, layer: Any, layer_name: str
-    ) -> List[FHEOperation]:
+    def _get_batchnorm_operations(self, layer: Any, layer_name: str) -> List[FHEOperation]:
         """
         Get operations for a standalone BatchNorm layer.
 
@@ -949,18 +937,10 @@ class OrionFrontend(FrontendInterface):
 
         # Get BatchNorm parameters
         weight = (
-            layer.weight.data
-            if hasattr(layer, "weight") and layer.weight is not None
-            else None
+            layer.weight.data if hasattr(layer, "weight") and layer.weight is not None else None
         )
-        bias = (
-            layer.bias.data
-            if hasattr(layer, "bias") and layer.bias is not None
-            else None
-        )
-        running_mean = (
-            layer.running_mean.data if hasattr(layer, "running_mean") else None
-        )
+        bias = layer.bias.data if hasattr(layer, "bias") and layer.bias is not None else None
+        running_mean = layer.running_mean.data if hasattr(layer, "running_mean") else None
         running_var = layer.running_var.data if hasattr(layer, "running_var") else None
         eps = getattr(layer, "eps", 1e-5)
 
@@ -1045,9 +1025,7 @@ class OrionFrontend(FrontendInterface):
 
         return operations
 
-    def _get_batchnorm2d_operations(
-        self, layer: Any, layer_name: str
-    ) -> List[FHEOperation]:
+    def _get_batchnorm2d_operations(self, layer: Any, layer_name: str) -> List[FHEOperation]:
         """
         Get operations for a BatchNorm2d layer.
 
@@ -1167,11 +1145,7 @@ class OrionFrontend(FrontendInterface):
         operations = []
 
         # ── Composite ReLU (sign + mult1 + mult2) ────────────────────
-        if (
-            hasattr(layer, "sign")
-            and hasattr(layer, "mult1")
-            and hasattr(layer, "mult2")
-        ):
+        if hasattr(layer, "sign") and hasattr(layer, "mult1") and hasattr(layer, "mult2"):
             prescale = float(getattr(layer, "prescale", 1.0))
             postscale = float(getattr(layer, "postscale", 1.0))
             prescaled_ref = f"{layer_name}_prescaled"
@@ -1261,11 +1235,7 @@ class OrionFrontend(FrontendInterface):
         domain_end = 1.0
 
         if hasattr(layer, "coeffs") and layer.coeffs:
-            relu_coeffs = (
-                layer.coeffs.tolist()
-                if hasattr(layer.coeffs, "tolist")
-                else layer.coeffs
-            )
+            relu_coeffs = layer.coeffs.tolist() if hasattr(layer.coeffs, "tolist") else layer.coeffs
         if hasattr(layer, "input_min") and hasattr(layer, "input_max"):
             domain_start = float(layer.input_min)
             domain_end = float(layer.input_max)
@@ -1381,9 +1351,7 @@ class OrionFrontend(FrontendInterface):
 
         return operations
 
-    def _get_chebyshev_operations(
-        self, layer: Any, layer_name: str
-    ) -> List[FHEOperation]:
+    def _get_chebyshev_operations(self, layer: Any, layer_name: str) -> List[FHEOperation]:
         """Get operations for Chebyshev layer."""
         operations = []
         level = getattr(layer, "level", 1)
@@ -1391,9 +1359,7 @@ class OrionFrontend(FrontendInterface):
         print(f"    🔍 Extracting Chebyshev data from {layer_name}:")
         print(f"       - Layer type: {layer.__class__.__name__}")
         print(f"       - Has coeffs: {hasattr(layer, 'coeffs')}")
-        print(
-            f"       - Has low/high: {hasattr(layer, 'low')}/{hasattr(layer, 'high')}"
-        )
+        print(f"       - Has low/high: {hasattr(layer, 'low')}/{hasattr(layer, 'high')}")
         print(f"       - Has degree: {hasattr(layer, 'degree')}")
         print(f"       - Has fn: {hasattr(layer, 'fn')}")
         print(
@@ -1412,9 +1378,7 @@ class OrionFrontend(FrontendInterface):
                 coeffs = list(layer.coeffs)
             else:
                 coeffs = [float(layer.coeffs)]
-            print(
-                f"       - Extracted coeffs: {coeffs[:5]}{'...' if len(coeffs) > 5 else ''}"
-            )
+            print(f"       - Extracted coeffs: {coeffs[:5]}{'...' if len(coeffs) > 5 else ''}")
         else:
             print("       - No coefficients found")
 
@@ -1458,9 +1422,7 @@ class OrionFrontend(FrontendInterface):
                     },
                 )
             )
-            print(
-                f"       ✅ Created orion.chebyshev operation with {len(coeffs)} coefficients"
-            )
+            print(f"       ✅ Created orion.chebyshev operation with {len(coeffs)} coefficients")
         else:
             print("       ⚠️ No coefficients available, skipping operation creation")
 
@@ -1528,9 +1490,7 @@ class OrionFrontend(FrontendInterface):
         # it's likely fused into another layer
         return not hasattr(layer, "level") or layer.level is None
 
-    def _get_activation_operations(
-        self, layer: Any, layer_name: str
-    ) -> List[FHEOperation]:
+    def _get_activation_operations(self, layer: Any, layer_name: str) -> List[FHEOperation]:
         """
         Get operations for a generic polynomial Activation layer.
 
@@ -1552,15 +1512,10 @@ class OrionFrontend(FrontendInterface):
         if hasattr(layer, "coeffs") and layer.coeffs is not None:
             return self._get_chebyshev_operations(layer, layer_name)
 
-        print(
-            f"    ⚠️  Activation {layer_name} ({layer_type}) has no coefficients; "
-            f"skipping"
-        )
+        print(f"    ⚠️  Activation {layer_name} ({layer_type}) has no coefficients; skipping")
         return []
 
-    def _get_generic_operations(
-        self, layer: Any, layer_name: str
-    ) -> List[FHEOperation]:
+    def _get_generic_operations(self, layer: Any, layer_name: str) -> List[FHEOperation]:
         """
         Get operations for generic/unknown layer types.
         """
@@ -1591,9 +1546,7 @@ class OrionFrontend(FrontendInterface):
         try:
             return FHEOperation(
                 op_type=op_dict.get("op_type", "unknown"),
-                method_name=op_dict.get(
-                    "method_name", op_dict.get("op_type", "unknown")
-                ),
+                method_name=op_dict.get("method_name", op_dict.get("op_type", "unknown")),
                 args=op_dict.get("args", []),
                 kwargs=op_dict.get("kwargs", {}),
                 result_var=op_dict.get("result_var"),
@@ -1611,9 +1564,7 @@ class OrionFrontend(FrontendInterface):
         try:
             return FHEOperation(
                 op_type=getattr(op_obj, "op_type", "unknown"),
-                method_name=getattr(
-                    op_obj, "method_name", getattr(op_obj, "op_type", "unknown")
-                ),
+                method_name=getattr(op_obj, "method_name", getattr(op_obj, "op_type", "unknown")),
                 args=getattr(op_obj, "args", []),
                 kwargs=getattr(op_obj, "kwargs", {}),
                 result_var=getattr(op_obj, "result_var", None),
@@ -1662,9 +1613,7 @@ class OrionFrontend(FrontendInterface):
 
         return self._create_scheme_from_config(config)
 
-    def _create_scheme_from_config(
-        self, config: Dict[str, Any]
-    ) -> OrionSchemeParameters:
+    def _create_scheme_from_config(self, config: Dict[str, Any]) -> OrionSchemeParameters:
         """Create scheme parameters from configuration dictionary."""
         ckks_params = config.get("ckks_params", {})
         orion_params = config.get("orion", {})

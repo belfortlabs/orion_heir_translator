@@ -312,9 +312,7 @@ class CKKSPlaintextHandler(BaseOperationHandler):
                         }
                     ),
                 )
-                cleartext_chunk = block.insert_arg(
-                    arg_type=new_argument_type, index=new_arg_index
-                )
+                cleartext_chunk = block.insert_arg(arg_type=new_argument_type, index=new_arg_index)
                 func_op.properties["arg_attrs"] = ArrayAttr(new_arg_attrs)
                 func_op.update_function_type()
 
@@ -942,13 +940,9 @@ class LinearTransformHandler(BaseOperationHandler):
 class CKKSQuadHandler(BaseOperationHandler):
     """Handler for CKKS quadratic activation operations."""
 
-    def _apply_quad(
-        self, ct: SSAValue, block: Block, type_builder: Any
-    ) -> SSAValue:
+    def _apply_quad(self, ct: SSAValue, block: Block, type_builder: Any) -> SSAValue:
         """Apply x*x + relin + rescale to a single ciphertext SSAValue."""
-        result_type = type_builder.infer_result_type_with_relinearization(
-            "mul", ct.type, ct.type
-        )
+        result_type = type_builder.infer_result_type_with_relinearization("mul", ct.type, ct.type)
         quad_op = MulOp(operands=[ct, ct], result_types=[result_type])
         block.add_op(quad_op)
 

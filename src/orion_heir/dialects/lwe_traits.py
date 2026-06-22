@@ -161,7 +161,7 @@ class IsCiphertextPlaintextOp(OpTrait):
         result_type = op.results[0].type
         if not isinstance(result_type, LWECiphertextType):
             raise VerifyException(
-                f"Operation {op.name} expected result to be ciphertext, " f"but got {result_type}"
+                f"Operation {op.name} expected result to be ciphertext, but got {result_type}"
             )
 
 

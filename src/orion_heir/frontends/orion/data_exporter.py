@@ -19,15 +19,17 @@ from orion_heir.frontends.orion.scheme_params import OrionSchemeParameters
 @dataclass
 class ExportedFile:
     """Metadata about a single exported binary file."""
-    name: str                    # e.g., "fc1_weights"
-    file: str                    # relative path from output_dir, e.g., "data/fc1_weights.bin"
-    shape: List[int]             # shape of the exported array
-    role: str                    # "weights", "bias", or "input"
+
+    name: str  # e.g., "fc1_weights"
+    file: str  # relative path from output_dir, e.g., "data/fc1_weights.bin"
+    shape: List[int]  # shape of the exported array
+    role: str  # "weights", "bias", or "input"
 
 
 @dataclass
 class ExportManifest:
     """Complete manifest of exported data."""
+
     func_name: str
     slots: int
     args: List[ExportedFile]
@@ -56,7 +58,7 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     if len(arr) >= length:
         return arr[:length]
     padded = np.zeros(length, dtype=np.float64)
-    padded[:len(arr)] = arr
+    padded[: len(arr)] = arr
     return padded
 
 
@@ -112,9 +114,7 @@ class OrionDataExporter:
         print(f"  Exported model data to {data_dir}/")
         return manifest
 
-    def _export_layer(
-        self, layer: Any, name: str, data_dir: Path
-    ) -> List[ExportedFile]:
+    def _export_layer(self, layer: Any, name: str, data_dir: Path) -> List[ExportedFile]:
         """Export diagonals and bias for a single layer."""
         files = []
 
@@ -128,17 +128,21 @@ class OrionDataExporter:
                 if hasattr(d, "numpy"):
                     d = d.detach().cpu().numpy()
                 d = np.asarray(d, dtype=np.float64)
-                flat_diags[i * self.slots:(i + 1) * self.slots] = _pad_to(d, self.slots)
+                flat_diags[i * self.slots : (i + 1) * self.slots] = _pad_to(d, self.slots)
 
-            block_suffix = f"_block_{block_key[0]}_{block_key[1]}" if len(layer.diagonals) > 1 else ""
+            block_suffix = (
+                f"_block_{block_key[0]}_{block_key[1]}" if len(layer.diagonals) > 1 else ""
+            )
             fname = f"{name}_weights{block_suffix}.bin"
             _write_f64_bin(data_dir / fname, flat_diags)
-            files.append(ExportedFile(
-                name=f"{name}_weights{block_suffix}",
-                file=f"data/{fname}",
-                shape=[len(sorted_indices), self.slots],
-                role="weights",
-            ))
+            files.append(
+                ExportedFile(
+                    name=f"{name}_weights{block_suffix}",
+                    file=f"data/{fname}",
+                    shape=[len(sorted_indices), self.slots],
+                    role="weights",
+                )
+            )
 
         # -- Bias — use Orion's packing formulas to match the FHE slot layout --
         # Only export bias when the layer actually has one; the translator's
@@ -155,18 +159,20 @@ class OrionDataExporter:
 
         for chunk_idx in range(num_chunks):
             start = chunk_idx * self.slots
-            chunk = bias_full[start:start + self.slots]
+            chunk = bias_full[start : start + self.slots]
             chunk = _pad_to(chunk, self.slots)
 
             chunk_suffix = f"_chunk{chunk_idx}" if num_chunks > 1 else ""
             fname = f"{name}_bias{chunk_suffix}.bin"
             _write_f64_bin(data_dir / fname, chunk)
-            files.append(ExportedFile(
-                name=f"{name}_bias{chunk_suffix}",
-                file=f"data/{fname}",
-                shape=[self.slots],
-                role="bias",
-            ))
+            files.append(
+                ExportedFile(
+                    name=f"{name}_bias{chunk_suffix}",
+                    file=f"data/{fname}",
+                    shape=[self.slots],
+                    role="bias",
+                )
+            )
 
         return files
 
@@ -185,7 +191,6 @@ class OrionDataExporter:
             return np.zeros(self.slots, dtype=np.float64)
 
         return bias_torch.detach().cpu().numpy().astype(np.float64)
-
 
     def _crypto_params_dict(self) -> dict:
         """Build the crypto_params section of the manifest."""
@@ -226,9 +231,7 @@ def generate_go_wrapper(
         imports.insert(5, '"github.com/tuneinsight/lattigo/v6/circuits/ckks/bootstrapping"')
 
     imports_str = "\n".join(f"\t{imp}" for imp in imports)
-    arg_files_str = "\n".join(
-        f'\t"{file}",  // {name}' for file, name in arg_files
-    )
+    arg_files_str = "\n".join(f'\t"{file}",  // {name}' for file, name in arg_files)
     arg_call = ", ".join(f"args[{i}]" for i in range(len(arg_files)))
 
     if has_bootstrapping:
@@ -236,9 +239,7 @@ def generate_go_wrapper(
             "(*bootstrapping.Evaluator, *ckks.Evaluator, ckks.Parameters, "
             "*ckks.Encoder, *rlwe.Encryptor, *rlwe.Decryptor)"
         )
-        configure_vars = (
-            "bootstrappingEval, evaluator, params, encoder, encryptor, decryptor"
-        )
+        configure_vars = "bootstrappingEval, evaluator, params, encoder, encryptor, decryptor"
         run_sig = (
             "bootstrappingEval *bootstrapping.Evaluator, "
             "evaluator *ckks.Evaluator, params ckks.Parameters, "
@@ -248,8 +249,7 @@ def generate_go_wrapper(
         call_prefix = "bootstrappingEval, evaluator, params, encoder"
     else:
         configure_ret = (
-            "(*ckks.Evaluator, ckks.Parameters, "
-            "*ckks.Encoder, *rlwe.Encryptor, *rlwe.Decryptor)"
+            "(*ckks.Evaluator, ckks.Parameters, *ckks.Encoder, *rlwe.Encryptor, *rlwe.Decryptor)"
         )
         configure_vars = "evaluator, params, encoder, encryptor, decryptor"
         run_sig = (
@@ -275,7 +275,7 @@ def generate_go_wrapper(
         f"}}\n"
         f"\n"
         f"func loadF64(path string) []float64 {{\n"
-        f'\tdata, err := os.ReadFile(path)\n'
+        f"\tdata, err := os.ReadFile(path)\n"
         f"\tif err != nil {{\n"
         f'\t\tpanic(fmt.Sprintf("failed to read %s: %v", path, err))\n'
         f"\t}}\n"
