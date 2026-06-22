@@ -4,7 +4,7 @@ An Orion entry dialect for HEIR.
 Just handles the ops not in Orion.
 """
 
-from xdsl.dialects.builtin import FloatAttr, ArrayAttr, f64, TensorType
+from xdsl.dialects.builtin import FloatAttr, ArrayAttr, IntegerAttr, f64, TensorType
 from xdsl.ir import Dialect
 from xdsl.irdl import (
     IRDLOperation,
@@ -12,6 +12,7 @@ from xdsl.irdl import (
     base,
     irdl_op_definition,
     operand_def,
+    opt_prop_def,
     prop_def,
     result_def,
     traits_def,
@@ -90,6 +91,11 @@ class ChebyshevOp(IRDLOperation):
     # Domain of approximation (optional, defaults to [-1, 1])
     domain_start = prop_def(FloatAttr, default=FloatAttr(-1.0, f64))
     domain_end = prop_def(FloatAttr, default=FloatAttr(1.0, f64))
+
+    # Optional target output scale (the modulus `ql` orion sets on the last
+    # composite-sign polynomial so the following multiply's rescale is exact).
+    # Absent => HEIR uses the default scale.
+    output_scale = opt_prop_def(IntegerAttr)
 
     # Result ciphertext
     result = result_def(LWECiphertextType)

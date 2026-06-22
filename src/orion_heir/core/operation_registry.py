@@ -1205,14 +1205,23 @@ class ChebyshevHandler(BaseOperationHandler):
             )
         else:
             result_type = type_builder.get_default_ciphertext_type()
+        cheby_props = {
+            "coefficients": coeff_array,
+            "domain_start": FloatAttr(domain_start, f64),
+            "domain_end": FloatAttr(domain_end, f64),
+        }
+        # Convey orion's per-poly output scale (ql) for the composite-sign
+        # chain's last polynomial, so HEIR evaluates it at ql (exact rescale)
+        # instead of the default scale.
+        output_scale = operation.kwargs.get("output_scale")
+        if output_scale is not None:
+            cheby_props["output_scale"] = IntegerAttr.from_int_and_width(
+                int(output_scale), 64
+            )
         cheby_op = ChebyshevOp(
             operands=[current_value],
             result_types=[result_type],
-            properties={
-                "coefficients": coeff_array,
-                "domain_start": FloatAttr(domain_start, f64),
-                "domain_end": FloatAttr(domain_end, f64),
-            },
+            properties=cheby_props,
         )
 
         block.add_op(cheby_op)

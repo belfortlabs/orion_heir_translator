@@ -1654,12 +1654,28 @@ class OrionFrontend(FrontendInterface):
         """
         operations = []
 
-        metadata: Dict[str, Any] = {
-            "operation": "noise_refresh",
-            "layer": layer_name,
-            "layer_type": "Bootstrap",
-            "purpose": "level_reset",
-        }
+        prescale = 1.0
+        postscale = 1.0
+        if layer is not None:
+            prescale = float(getattr(layer, "prescale", 1) or 1)
+            postscale = float(getattr(layer, "postscale", 1) or 1)
+
+        if prescale != 1.0:
+            operations.append(
+                FHEOperation(
+                    op_type="ckks.mul_scalar",
+                    method_name="mul_scalar",
+                    args=[],
+                    kwargs={},
+                    result_var=f"{layer_name}_bootprescale",
+                    level=None,
+                    metadata={
+                        "operation": "bootstrap_prescale",
+                        "constant_value": prescale,
+                        "layer": layer_name,
+                    },
+                )
+            )
 
         operations.append(
             FHEOperation(
@@ -1669,9 +1685,31 @@ class OrionFrontend(FrontendInterface):
                 kwargs={},
                 result_var=f"{layer_name}_refreshed",
                 level=5,  # Bootstrap typically resets to high level
-                metadata=metadata,
+                metadata={
+                    "operation": "noise_refresh",
+                    "layer": layer_name,
+                    "layer_type": "Bootstrap",
+                    "purpose": "level_reset",
+                },
             )
         )
+
+        if postscale != 1.0:
+            operations.append(
+                FHEOperation(
+                    op_type="ckks.mul_scalar",
+                    method_name="mul_scalar",
+                    args=[],
+                    kwargs={},
+                    result_var=f"{layer_name}_bootpostscale",
+                    level=None,
+                    metadata={
+                        "operation": "bootstrap_postscale",
+                        "constant_value": postscale,
+                        "layer": layer_name,
+                    },
+                )
+            )
 
         return operations
 
@@ -1757,6 +1795,17 @@ class OrionFrontend(FrontendInterface):
             function_type = str(layer.fn)
         print(f"       - Function type: {function_type}")
 
+        # Output scale: orion's composite-sign chain sets the last polynomial's
+        # output scale to the modulus `ql` at the output level (set_output_scale
+        # during the compile he-forward) so the following ciphertext-multiply's
+        # rescale is exact. Convey it so HEIR uses ql instead of the default
+        # scale; absent (None) for the intermediate sign polys / standalone
+        # chebyshevs, where the default scale is correct.
+        output_scale = getattr(layer, "output_scale", None)
+        if output_scale is not None:
+            output_scale = int(output_scale)
+        print(f"       - output_scale (ql): {output_scale}")
+
         # Only create operation if we have coefficients
         if coeffs:
             operations.append(
@@ -1768,6 +1817,7 @@ class OrionFrontend(FrontendInterface):
                         "coefficients": coeffs,
                         "domain_start": domain_start,
                         "domain_end": domain_end,
+                        "output_scale": output_scale,
                     },
                     result_var=f"{layer_name}_result",
                     level=level - 1,

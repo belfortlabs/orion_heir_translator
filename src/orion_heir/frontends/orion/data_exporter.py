@@ -224,10 +224,16 @@ class OrionDataExporter:
     def _pack_bias_full(self, layer: Any) -> np.ndarray:
         """Return the full FHE-packed bias vector (may exceed slots for multi-ID layers)."""
         from orion.core import packing as orion_packing
-        from orion.nn.linear import Linear as OrionLinear, Conv2d as OrionConv2d
+        from orion.nn.linear import (
+            Linear as OrionLinear,
+            Conv1d as OrionConv1d,
+            Conv2d as OrionConv2d,
+        )
 
         if isinstance(layer, OrionLinear):
             bias_torch = orion_packing.construct_linear_bias(layer)
+        elif isinstance(layer, OrionConv1d):
+            bias_torch = orion_packing.construct_conv1d_bias(layer)
         elif isinstance(layer, OrionConv2d):
             bias_torch = orion_packing.construct_conv2d_bias(layer)
         else:
