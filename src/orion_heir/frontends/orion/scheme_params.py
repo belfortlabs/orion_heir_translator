@@ -101,6 +101,7 @@ class OrionSchemeParameters(SchemeParameters):
 
         # Ensure the keys/diagonals directory exists before Orion writes to it
         from pathlib import Path
+
         Path(self._keys_path).parent.mkdir(parents=True, exist_ok=True)
 
         # Initialize scheme

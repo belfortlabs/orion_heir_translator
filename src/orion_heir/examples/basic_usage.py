@@ -21,7 +21,7 @@ def create_sample_operations():
             args=[torch.tensor([[1.0, 2.0, 3.0, 4.0]])],
             kwargs={},
             result_var="weight_mul",
-            level=3
+            level=3,
         ),
         FHEOperation(
             op_type="add_plain",
@@ -29,8 +29,8 @@ def create_sample_operations():
             args=[torch.tensor([[0.5, 0.5, 0.5, 0.5]])],
             kwargs={},
             result_var="bias_add",
-            level=3
-        )
+            level=3,
+        ),
     ]
 
 
@@ -47,7 +47,7 @@ def main():
         logScale=45,
         slots=2048,
         ring_degree=4096,
-        backend='lattigo',
+        backend="lattigo",
     )
 
     print(f"✅ Scheme parameters: {scheme_params}")
