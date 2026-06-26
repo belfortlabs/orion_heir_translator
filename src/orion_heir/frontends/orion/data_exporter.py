@@ -293,6 +293,7 @@ def generate_go_wrapper(
         '"fmt"',
         '"math"',
         '"os"',
+        '"time"',
         "",
         '"github.com/tuneinsight/lattigo/v6/core/rlwe"',
         '"github.com/tuneinsight/lattigo/v6/schemes/ckks"',
@@ -300,7 +301,7 @@ def generate_go_wrapper(
     if has_bootstrapping:
         # Insert before the rlwe import
         imports.insert(
-            5, '"github.com/tuneinsight/lattigo/v6/circuits/ckks/bootstrapping"'
+            6, '"github.com/tuneinsight/lattigo/v6/circuits/ckks/bootstrapping"'
         )
 
     imports_str = "\n".join(f"\t{imp}" for imp in imports)
@@ -426,28 +427,38 @@ def generate_go_wrapper(
         f"}}\n"
         f"\n"
         f"// runOn evaluates the model on specific input file(s). Used by the\n"
-        f"// N-example harness to amortise keygen across multiple inputs.\n"
-        f"func runOn({run_sig}{run_extra_sig}) []float64 {{\n"
+        f"// N-example harness to amortise keygen across multiple inputs. It\n"
+        f"// returns the per-phase wall-clock split (encrypt / eval / decrypt in\n"
+        f"// ms) alongside the result so the benchmark table can fill those\n"
+        f"// columns; keygen is timed by the caller around configure().\n"
+        f"func runOn({run_sig}{run_extra_sig}) (result []float64, encryptMs float64, inferenceMs float64, decryptMs float64) {{\n"
         f"\targs := make([][]float64, len(argFiles))\n"
         f"\tfor i, f := range argFiles {{\n"
         f"\t\targs[i] = loadF64(f)\n"
         f"\t}}\n"
         f"\n"
+        f"\ttEnc := time.Now()\n"
         f"{encrypt_block}\n"
+        f"\tencryptMs = float64(time.Since(tEnc)) / float64(time.Millisecond)\n"
         f"\n"
+        f"\ttEval := time.Now()\n"
         f"\tresultCt := {func_name}({call_prefix}, {ct_args}, {arg_call})\n"
+        f"\tinferenceMs = float64(time.Since(tEval)) / float64(time.Millisecond)\n"
         f"\n"
+        f"\ttDec := time.Now()\n"
         f"\tresultPt := decryptor.DecryptNew(resultCt)\n"
-        f"\tresult := make([]float64, params.MaxSlots())\n"
+        f"\tresult = make([]float64, params.MaxSlots())\n"
         f"\tif err := encoder.Decode(resultPt, result); err != nil {{\n"
         f"\t\tpanic(err)\n"
         f"\t}}\n"
-        f"\treturn result\n"
+        f"\tdecryptMs = float64(time.Since(tDec)) / float64(time.Millisecond)\n"
+        f"\treturn\n"
         f"}}\n"
         f"\n"
         f"// Single-example back-compat shim.\n"
         f"func run({run_sig}) []float64 {{\n"
-        f"\treturn runOn({configure_vars}, {run_extra_call})\n"
+        f"\tresult, _, _, _ := runOn({configure_vars}, {run_extra_call})\n"
+        f"\treturn result\n"
         f"}}\n"
     )
 
@@ -466,15 +477,18 @@ def generate_go_wrapper(
         ")\n"
         "\n"
         "func main() {\n"
+        "\ttKey := time.Now()\n"
         f"\t{configure_vars} := configure()\n"
-        "\tstart := time.Now()\n"
-        f"\tresult := run({configure_vars})\n"
-        "\telapsed := time.Since(start)\n"
+        "\tkeygenMs := float64(time.Since(tKey)) / float64(time.Millisecond)\n"
+        f"\tresult, encryptMs, inferenceMs, decryptMs := runOn({configure_vars}, {run_extra_call})\n"
         "\ttype Result struct {\n"
         '\t\tResult      []float64 `json:"result"`\n'
+        '\t\tKeygenMs    float64   `json:"keygen_ms"`\n'
+        '\t\tEncryptMs   float64   `json:"encrypt_ms"`\n'
         '\t\tInferenceMs float64   `json:"inference_ms"`\n'
+        '\t\tDecryptMs   float64   `json:"decrypt_ms"`\n'
         "\t}\n"
-        "\tenc, _ := json.Marshal(Result{Result: result, InferenceMs: float64(elapsed.Milliseconds())})\n"
+        "\tenc, _ := json.Marshal(Result{Result: result, KeygenMs: keygenMs, EncryptMs: encryptMs, InferenceMs: inferenceMs, DecryptMs: decryptMs})\n"
         "\tfmt.Println(string(enc))\n"
         "}\n"
     )
