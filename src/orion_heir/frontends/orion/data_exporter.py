@@ -272,6 +272,8 @@ def generate_go_wrapper(
     `has_bootstrapping` is true.
     """
     func_name = manifest.func_name
+    go_func_name = func_name.lstrip("_")
+    go_func_name = go_func_name[:1].upper() + go_func_name[1:]
     arg_files = [(arg.file, arg.name) for arg in manifest.args]
     # Multi-input models (e.g. CriteoHELRM) have manifest.inputs populated
     # with one entry per forward placeholder. Single-input models stick with
@@ -423,7 +425,7 @@ def generate_go_wrapper(
         f"}}\n"
         f"\n"
         f"func configure() {configure_ret} {{\n"
-        f"\treturn {func_name}__configure()\n"
+        f"\treturn {go_func_name}__configure()\n"
         f"}}\n"
         f"\n"
         f"// runOn evaluates the model on specific input file(s). Used by the\n"
@@ -442,7 +444,7 @@ def generate_go_wrapper(
         f"\tencryptMs = float64(time.Since(tEnc)) / float64(time.Millisecond)\n"
         f"\n"
         f"\ttEval := time.Now()\n"
-        f"\tresultCt := {func_name}({call_prefix}, {ct_args}, {arg_call})\n"
+        f"\tresultCt := {go_func_name}({call_prefix}, {ct_args}, {arg_call})\n"
         f"\tinferenceMs = float64(time.Since(tEval)) / float64(time.Millisecond)\n"
         f"\n"
         f"\ttDec := time.Now()\n"
