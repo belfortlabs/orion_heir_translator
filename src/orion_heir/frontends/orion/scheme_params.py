@@ -36,7 +36,6 @@ class OrionSchemeParameters(SchemeParameters):
         keys_path: str = "data/keys.h5",
         diags_path: str = "data/diagonals.h5",
         input_level: Optional[int] = None,
-        boot_log_p: Optional[List[int]] = None,
     ):
         # Normalize logN to always be an integer for Orion
         self.logN = logN[0] if isinstance(logN, list) else logN
@@ -61,13 +60,6 @@ class OrionSchemeParameters(SchemeParameters):
         self.input_level = (
             input_level if input_level is not None else len(mod) - 1
         )
-        # Per-prime bit widths for the bootstrap-circuit's auxiliary
-        # modulus, mirroring orion's `boot_params.LogP`. Required for
-        # correctness on bootstrapping models — without it HEIR's
-        # bootstrapping.ParametersLiteral takes Lattigo defaults that
-        # don't match the level/scale chain the model was compiled
-        # against. None => not a bootstrapping model.
-        self.boot_log_p = boot_log_p
 
     @property
     def ring_degree(self) -> int:
