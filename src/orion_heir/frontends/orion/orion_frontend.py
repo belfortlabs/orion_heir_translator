@@ -10,9 +10,11 @@ import yaml
 import torch
 import numpy as np
 from pathlib import Path
+from math import prod
 
 from orion_heir.core.types import FHEOperation, FrontendInterface, SchemeParameters
 from orion_heir.frontends.orion.scheme_params import OrionSchemeParameters
+from orion_heir.frontends.orion.layer_utils import effective_bias
 
 
 def fix_encode_operations(module, type_builder):
@@ -302,23 +304,28 @@ class OrionFrontend(FrontendInterface):
         # forwards (e.g. CriteoHELRM's `forward(dense, expanded_sparse)`)
         # can be routed to the right function argument in the translator.
         # Falls back to the single-input "__input__" sentinel when there's
-        # only one placeholder (preserves back-compat with all existing
-        # one-arg models).
+        # only one ciphertext chunk. Wide placeholders occupy consecutive
+        # arguments, in the same order used by the data exporter.
         placeholder_to_sentinel: dict = {}
+        input_blocks: dict = {}
         try:
             if _traced is not None:
-                placeholders = [
-                    n for n in _traced.graph.nodes if n.op == "placeholder"
+                placeholders = [n for n in _traced.graph.nodes if n.op == "placeholder"]
+                slots = _orion_scheme.params.get_slots()
+                counts = [
+                    max(1, (prod(getattr(p, "output_shape", None) or (1,)) + slots - 1) // slots)
+                    for p in placeholders
                 ]
-                if len(placeholders) == 1:
-                    placeholder_to_sentinel[placeholders[0].name] = "__input__"
-                else:
-                    for i, p in enumerate(placeholders):
-                        placeholder_to_sentinel[p.name] = f"__input_{i}__"
-                # Cache the count on the frontend so callers (e.g. the
-                # translator and data exporter) can size their function
-                # signature / input-bin emission appropriately.
-                self.num_inputs = len(placeholders)
+                self.num_inputs = sum(counts)
+                offset = 0
+                for placeholder, count in zip(placeholders, counts):
+                    names = [
+                        "__input__" if self.num_inputs == 1 else f"__input_{offset + i}__"
+                        for i in range(count)
+                    ]
+                    placeholder_to_sentinel[placeholder.name] = names[0]
+                    input_blocks[names[0]] = names
+                    offset += count
         except Exception:  # pragma: no cover
             pass
 
@@ -479,7 +486,7 @@ class OrionFrontend(FrontendInterface):
             eff_input_normalised = None if is_input_sentinel else eff_input
             need_reset = (
                 eff_input is not None
-                and eff_input_normalised != last_emitted_layer
+                and (is_input_sentinel or eff_input_normalised != last_emitted_layer)
             )
             reset_target = (
                 eff_input
@@ -511,6 +518,7 @@ class OrionFrontend(FrontendInterface):
                                 "operation": "branch_reset",
                                 "layer": name,
                                 "to": reset_target,
+                                "input_blocks": input_blocks.get(reset_target),
                             },
                         )
                     )
@@ -996,12 +1004,13 @@ class OrionFrontend(FrontendInterface):
             final_result = f"{layer_name}_linear"
 
         # Bias addition (using the final accumulated result)
-        if hasattr(layer, "bias") and layer.bias is not None:
+        bias = effective_bias(layer)
+        if bias is not None:
             operations.append(
                 FHEOperation(
                     op_type="encode",
                     method_name="encode",
-                    args=[layer.bias],
+                    args=[bias],
                     kwargs={},
                     result_var=f"{layer_name}_bias_encoded",
                     level=level,
@@ -1159,12 +1168,13 @@ class OrionFrontend(FrontendInterface):
             final_result = f"{layer_name}_conv"
 
         # Bias addition if present
-        if hasattr(layer, "bias") and layer.bias is not None:
+        bias = effective_bias(layer)
+        if bias is not None:
             operations.append(
                 FHEOperation(
                     op_type="encode",
                     method_name="encode",
-                    args=[layer.bias],
+                    args=[bias],
                     kwargs={},
                     result_var=f"{layer_name}_bias_encoded",
                     level=level,

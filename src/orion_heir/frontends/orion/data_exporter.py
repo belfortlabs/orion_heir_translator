@@ -14,6 +14,8 @@ from typing import Any, List, Optional
 import numpy as np
 
 from orion_heir.frontends.orion.scheme_params import OrionSchemeParameters
+from orion_heir.frontends.orion.layer_utils import effective_bias
+from orion_heir.frontends.orion.input_utils import ciphertext_chunks
 
 
 @dataclass
@@ -36,7 +38,7 @@ class ExportManifest:
     input: dict
     crypto_params: dict
     # Multi-input models (e.g. CriteoHELRM with `forward(dense, expanded_sparse)`)
-    # carry one entry per forward placeholder; single-input models leave this
+    # carry one entry per ciphertext chunk; single-chunk models leave this
     # empty and rely on `input` (legacy back-compat).
     inputs: Optional[List[dict]] = None
 
@@ -100,11 +102,7 @@ class OrionDataExporter:
         data_dir = output_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Normalise to a list of tensors so the rest of the export is uniform.
-        if isinstance(input_tensor, (tuple, list)):
-            inputs: list = list(input_tensor)
-        else:
-            inputs = [input_tensor]
+        inputs = ciphertext_chunks(input_tensor, self.slots)
 
         # Export each input as a separate file. The first input is also
         # mirrored at the legacy `data/input.bin` path so existing
@@ -190,10 +188,8 @@ class OrionDataExporter:
             )
 
         # -- Bias — use Orion's packing formulas to match the FHE slot layout --
-        # Only export bias when the layer actually has one; the translator's
-        # _get_linear_operations likewise only emits encode+add_plain for bias
-        # when layer.bias is not None, so the counts must agree.
-        if not (hasattr(layer, "bias") and layer.bias is not None):
+        # Match the compiled bias used by operation extraction, including fusion.
+        if effective_bias(layer) is None:
             return files
 
         # The bias vector may span multiple ciphertext IDs (chunks of `slots` elements).
@@ -237,8 +233,9 @@ class OrionDataExporter:
         elif isinstance(layer, OrionConv2d):
             bias_torch = orion_packing.construct_conv2d_bias(layer)
         else:
-            if layer.bias is not None:
-                return layer.bias.detach().cpu().numpy().astype(np.float64)
+            bias = effective_bias(layer)
+            if bias is not None:
+                return bias.detach().cpu().numpy().astype(np.float64)
             return np.zeros(self.slots, dtype=np.float64)
 
         return bias_torch.detach().cpu().numpy().astype(np.float64)
@@ -276,7 +273,7 @@ def generate_go_wrapper(
     go_func_name = go_func_name[:1].upper() + go_func_name[1:]
     arg_files = [(arg.file, arg.name) for arg in manifest.args]
     # Multi-input models (e.g. CriteoHELRM) have manifest.inputs populated
-    # with one entry per forward placeholder. Single-input models stick with
+    # with one entry per ciphertext chunk. Single-chunk models stick with
     # the legacy `manifest.input` (one file).
     input_files = (
         [entry["file"] for entry in manifest.inputs]

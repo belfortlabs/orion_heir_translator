@@ -61,8 +61,8 @@ class GenericTranslator:
             operations: List of FHE operations to translate
             scheme_params: FHE scheme parameters
             function_name: Name for the generated function
-            num_inputs: Number of ciphertext function arguments (= number of
-                forward() placeholders in the source model). If omitted,
+            num_inputs: Number of ciphertext function arguments, including all
+                chunks of forward inputs wider than the slot count. If omitted,
                 infer it from `__set_current__` input sentinels.
 
         Returns:
@@ -100,16 +100,17 @@ class GenericTranslator:
             if operation.op_type != "__set_current__" or not operation.args:
                 continue
 
-            target = operation.args[0]
-            if not isinstance(target, str):
-                continue
-
-            if not (target.startswith("@__input_") and target.endswith("__")):
-                continue
-
-            suffix = target[len("@__input_") : -2]
-            if suffix.isdigit():
-                max_input_index = max(max_input_index, int(suffix))
+            targets = list(operation.args)
+            targets.extend(
+                "@" + name for name in (operation.metadata or {}).get("input_blocks") or []
+            )
+            for target in targets:
+                if not isinstance(target, str):
+                    continue
+                if target.startswith("@__input_") and target.endswith("__"):
+                    suffix = target[len("@__input_") : -2]
+                    if suffix.isdigit():
+                        max_input_index = max(max_input_index, int(suffix))
 
         return max_input_index + 1
 
@@ -131,8 +132,8 @@ class GenericTranslator:
     ) -> FuncOp:
         """Create a function with simple sequential operation processing.
 
-        `num_inputs` controls the function arity: each forward() placeholder
-        becomes one ciphertext function argument. Single-input models
+        `num_inputs` controls the function arity: each ciphertext chunk of a
+        forward() input becomes one function argument. Single-input models
         register the legacy `__input__` sentinel; multi-input models also
         register `__input_0__`, `__input_1__`, … pointing at args[0], args[1].
         """
@@ -182,6 +183,13 @@ class GenericTranslator:
                         target = a0[1:]
                 if target and target in constants:
                     current_value = constants[target]
+                    input_blocks = (operation.metadata or {}).get("input_blocks")
+                    if input_blocks is not None:
+                        for key in list(constants):
+                            if key.startswith("__pipeline_block_"):
+                                del constants[key]
+                        for index, name in enumerate(input_blocks[1:], 1):
+                            constants[f"__pipeline_block_{index}"] = constants[name]
                 else:
                     print(
                         f"⚠️  __set_current__ target {target!r} not in constants; keeping current_value"
